@@ -1,0 +1,37 @@
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: kart_postgres # <-- БЫЛО cart_postgres
+    environment:
+      POSTGRES_DB: kart_db        # <-- БЫЛО cart_db
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: root
+    ports:
+      - "5433:5432"
+    volumes:
+      - kart_postgres_data:/var/lib/postgresql/data # <-- БЫЛО cart_postgres_data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  app:
+    build: .
+    container_name: kart_app      # <-- БЫЛО cart_app
+    ports:
+      - "8080:8080"
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/kart_db # <-- БЫЛО cart_db
+      SPRING_DATASOURCE_USERNAME: postgres
+      SPRING_DATASOURCE_PASSWORD: root
+      SPRING_JPA_HIBERNATE_DDL_AUTO: validate
+      SPRING_FLYWAY_ENABLED: "true"
+      SPRING_FLYWAY_LOCATIONS: classpath:db/migration
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  kart_postgres_data:             # <-- БЫЛО cart_postgres_data
+    driver: local

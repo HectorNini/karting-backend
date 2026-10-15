@@ -1,0 +1,66 @@
+package ninibayr.karting.service;
+
+import lombok.extern.slf4j.Slf4j;
+import ninibayr.karting.dto.HeatData;
+import ninibayr.karting.entity.HeatEntity;
+import ninibayr.karting.entity.TrackEntity;
+import ninibayr.karting.repository.HeatRepository;
+import ninibayr.karting.repository.TrackRepository;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Propagation;
+import org.springframework.transaction.annotation.Transactional;
+
+@Service
+@Slf4j
+public class HeatSyncService {
+
+    private final TrackRepository trackRepository;
+    private final HeatRepository heatRepository;
+    private final HeatParser heatParser;
+    private final HeatMapper heatMapper;
+
+    public HeatSyncService(TrackRepository trackRepository, HeatRepository heatRepository,
+                           HeatParser heatParser, HeatMapper heatMapper) {
+        this.trackRepository = trackRepository;
+        this.heatRepository = heatRepository;
+        this.heatParser = heatParser;
+        this.heatMapper = heatMapper;
+    }
+
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public HeatData syncHeat(String heatSiteId) {
+        try {
+            TrackEntity track = trackRepository.findBySlug("narvskaya")
+                    .orElseThrow(() -> new RuntimeException("Трасса 'narvskaya' не найдена в БД"));
+
+            // 1. ПАТТЕРН UPSERT: Находим существующий или готовим новый
+            HeatEntity heatEntity = heatRepository.findBySiteId(heatSiteId).orElseGet(() -> {
+                HeatEntity newHeat = new HeatEntity();
+                newHeat.setSiteId(heatSiteId);
+                newHeat.setTrack(track);
+                return newHeat;
+            });
+
+            String url = "https://timing.batyrshin.name/tracks/narvskaya/heats/" + heatSiteId;
+
+            // 2. Парсим свежие данные
+            ParsedHeatData parsedData = heatParser.parse(url);
+
+            // 3. Обновляем сущность (внутри очистятся старые круги и добавятся новые)
+            heatMapper.updateEntity(heatEntity, parsedData, track);
+
+            // 4. Сохраняем. Hibernate увидит, что у heatEntity есть ID (если он был найден),
+            // и выполнит UPDATE, а не INSERT.
+            heatRepository.save(heatEntity);
+
+            log.info("Успешно синхронизировано (обновлено): {} (ID: {}), кругов: {}",
+                    heatEntity.getName(), heatSiteId, heatEntity.getLaps().size());
+
+            return heatMapper.toDto(heatEntity);
+
+        } catch (Exception e) {
+            log.error("Критическая ошибка синхронизации для {}: {}", heatSiteId, e.getMessage(), e);
+            throw new RuntimeException("Не удалось получить данные для заезда " + heatSiteId, e);
+        }
+    }
+}
