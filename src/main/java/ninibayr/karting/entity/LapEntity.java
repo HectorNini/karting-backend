@@ -22,6 +22,7 @@ public class LapEntity {
     private DriverEntity driver;
 
     private Integer kartNumber;
+    private Integer columnIndex;
     private Integer lapNumber;
     private String lapTime;   // Оставляем String, т.к. может быть "DNF" или пусто
     private String position;  // "P1", "P2" и т.д.

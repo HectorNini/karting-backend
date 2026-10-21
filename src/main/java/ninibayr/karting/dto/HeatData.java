@@ -3,6 +3,9 @@ package ninibayr.karting.dto;
 import lombok.AllArgsConstructor;
 import lombok.Data;
 import lombok.NoArgsConstructor;
+
+import java.time.LocalDate;
+import java.time.LocalTime;
 import java.util.List;
 
 @Data
@@ -10,8 +13,19 @@ import java.util.List;
 @AllArgsConstructor
 public class HeatData {
     private String heatName;
-    private List<String> drivers;
+    private LocalDate raceDate;
+    private LocalTime raceTime;
+    private List<DriverInfo> drivers;
     private List<LapRow> laps;
+
+    @Data
+    @NoArgsConstructor
+    @AllArgsConstructor
+    public static class DriverInfo {
+        private String siteId;
+        private String name;
+        private Integer kartNumber;
+    }
 
     @Data
     @NoArgsConstructor

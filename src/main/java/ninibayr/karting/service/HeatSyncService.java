@@ -6,6 +6,7 @@ import ninibayr.karting.entity.HeatEntity;
 import ninibayr.karting.entity.TrackEntity;
 import ninibayr.karting.repository.HeatRepository;
 import ninibayr.karting.repository.TrackRepository;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
@@ -19,6 +20,12 @@ public class HeatSyncService {
     private final HeatParser heatParser;
     private final HeatMapper heatMapper;
 
+    @Value("${karting.track.slug}")
+    private String trackSlug;
+
+    @Value("${karting.base-url}")
+    private String baseUrl;
+
     public HeatSyncService(TrackRepository trackRepository, HeatRepository heatRepository,
                            HeatParser heatParser, HeatMapper heatMapper) {
         this.trackRepository = trackRepository;
@@ -30,8 +37,8 @@ public class HeatSyncService {
     @Transactional(propagation = Propagation.REQUIRES_NEW)
     public HeatData syncHeat(String heatSiteId) {
         try {
-            TrackEntity track = trackRepository.findBySlug("narvskaya")
-                    .orElseThrow(() -> new RuntimeException("Трасса 'narvskaya' не найдена в БД"));
+            TrackEntity track = trackRepository.findBySlug(trackSlug)
+                    .orElseThrow(() -> new RuntimeException("Трасса '" + trackSlug + "' не найдена в БД"));
 
             // 1. ПАТТЕРН UPSERT: Находим существующий или готовим новый
             HeatEntity heatEntity = heatRepository.findBySiteId(heatSiteId).orElseGet(() -> {
@@ -41,7 +48,7 @@ public class HeatSyncService {
                 return newHeat;
             });
 
-            String url = "https://timing.batyrshin.name/tracks/narvskaya/heats/" + heatSiteId;
+            String url = baseUrl + "/" + trackSlug + "/heats/" + heatSiteId;
 
             // 2. Парсим свежие данные
             ParsedHeatData parsedData = heatParser.parse(url);
