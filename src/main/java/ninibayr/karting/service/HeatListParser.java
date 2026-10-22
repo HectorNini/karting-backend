@@ -1,5 +1,6 @@
 package ninibayr.karting.service;
 
+import lombok.extern.slf4j.Slf4j;
 import ninibayr.karting.dto.HeatList;
 import org.jsoup.Jsoup;
 import org.jsoup.nodes.Document;
@@ -12,10 +13,18 @@ import java.time.LocalDate;
 import java.time.MonthDay;
 import java.time.Year;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 @Component
+@Slf4j
 public class HeatListParser {
+
+    /** Максимальное число заездов, которое отдаём в списке. */
+    private static final int MAX_HEATS = 100;
+    /** Защита от бесконечного цикла при обходе страниц пагинации. */
+    private static final int MAX_PAGES = 10;
 
     @Value("${karting.user-agent}")
     private String userAgent;
@@ -27,26 +36,82 @@ public class HeatListParser {
     private String baseUrl;
 
     public HeatList parseCurrentTrack() throws Exception {
+        // Ключ — id заезда, значение — элемент. LinkedHashMap сохраняет порядок "свежие сверху".
+        Map<String, HeatList.HeatItem> byId = new LinkedHashMap<>();
+
         String url = baseUrl + "/" + trackSlug + "/heats";
-        Document doc = Jsoup.connect(url)
-                .userAgent(userAgent)
-                .timeout(5000)
-                .get();
-        return parse(doc, trackSlug);
+        Year year = Year.now();
+        MonthDay[] carry = new MonthDay[]{null};
+        LocalDate[] carryDate = new LocalDate[]{null};
+
+        int page = 0;
+        while (url != null && page < MAX_PAGES && byId.size() < MAX_HEATS) {
+            Document doc = Jsoup.connect(url)
+                    .userAgent(userAgent)
+                    .timeout(8000)
+                    .get();
+
+            List<HeatList.HeatItem> pageItems = parse(doc, trackSlug, year, carry, carryDate);
+            for (HeatList.HeatItem item : pageItems) {
+                byId.putIfAbsent(item.getId(), item);
+                if (byId.size() >= MAX_HEATS) {
+                    break;
+                }
+            }
+
+            // Ссылка на следующую страницу (?start_time=...)
+            String nextHref = findNextHref(doc);
+            if (nextHref == null || nextHref.isBlank()) {
+                break;
+            }
+            url = nextHref.startsWith("http") ? nextHref : baseUrl.substring(0, baseUrl.indexOf("/tracks")) + nextHref;
+            page++;
+        }
+
+        List<HeatList.HeatItem> heats = new ArrayList<>(byId.values());
+        if (heats.size() > MAX_HEATS) {
+            heats = heats.subList(0, MAX_HEATS);
+        }
+        return new HeatList(trackSlug, heats);
+    }
+
+    private static String findNextHref(Document doc) {
+        Element next = doc.selectFirst("a.page-link:has(b:matchesOwn((?i)next))");
+        if (next == null) {
+            // запасной вариант: ссылка с start_time и текстом Next
+            for (Element a : doc.select("a[href*=start_time]")) {
+                if (a.text().toLowerCase().contains("next")) {
+                    next = a;
+                    break;
+                }
+            }
+        }
+        return next != null ? next.attr("href") : null;
     }
 
     HeatList parse(Document doc, String slug) {
+        Year year = Year.now();
+        return new HeatList(slug,
+                parse(doc, slug, year, new MonthDay[]{null}, new LocalDate[]{null}));
+    }
+
+    List<HeatList.HeatItem> parse(Document doc, String slug, Year year,
+                                  MonthDay[] previousMonthDayCarry,
+                                  LocalDate[] currentDateCarry) {
         List<HeatList.HeatItem> heats = new ArrayList<>();
         String hrefNeedle = "/tracks/" + slug + "/heats/";
 
-        Year year = Year.now();
-        MonthDay previousMonthDay = null;
-        LocalDate currentDate = null;
+        Year currentYear = year;
+        MonthDay previousMonthDay = previousMonthDayCarry[0];
+        LocalDate currentDate = currentDateCarry[0];
 
         Elements items = doc.select(".list-group-item");
         for (Element item : items) {
             if (item.hasClass("heat-list-date")) {
                 Element dateElement = item.selectFirst("b");
+                if (dateElement == null) {
+                    dateElement = item.selectFirst("strong, b");
+                }
                 if (dateElement == null) {
                     continue;
                 }
@@ -54,15 +119,18 @@ public class HeatListParser {
                 if (monthDay == null) {
                     continue;
                 }
-                currentDate = TimingSiteFormats.resolveListDate(monthDay, previousMonthDay, year);
+                currentDate = TimingSiteFormats.resolveListDate(monthDay, previousMonthDay, currentYear);
                 if (currentDate != null) {
-                    year = Year.from(currentDate);
+                    currentYear = Year.from(currentDate);
                     previousMonthDay = monthDay;
                 }
                 continue;
             }
 
             Element link = item.selectFirst("a[href*='" + hrefNeedle + "']");
+            if (link == null) {
+                link = item.selectFirst("a[href*='/heats/']");
+            }
             if (link == null) {
                 continue;
             }
@@ -74,23 +142,55 @@ public class HeatListParser {
 
             HeatList.HeatItem heatItem = new HeatList.HeatItem();
             heatItem.setId(id);
-            heatItem.setName(link.text().trim());
+
+            // Тип определяем по иконке внутри ссылки: stopwatch = заезд, trophy = гонка/финал.
+            heatItem.setType(detectType(link));
+
+            String name = link.text().replaceAll("\\s+", " ").trim();
+            heatItem.setName(name);
             heatItem.setDate(currentDate != null ? currentDate.toString() : null);
 
             Element small = item.selectFirst("small");
             if (small != null) {
-                heatItem.setTime(small.text().trim());
+                String t = small.text().trim();
+                if (t.contains(",")) {
+                    heatItem.setTime(t.split(",")[0].trim());
+                } else {
+                    heatItem.setTime(t);
+                }
             }
 
             Element resultDiv = item.selectFirst(".col-12.mb-1.small");
             if (resultDiv != null) {
-                heatItem.setTopResult(resultDiv.text().trim());
+                String top = resultDiv.text().replaceAll("\\s+", " ").trim();
+                heatItem.setTopResult(top.isEmpty() ? null : top);
             }
 
-            if (!heatItem.getName().isEmpty() && heats.stream().noneMatch(h -> h.getId().equals(heatItem.getId()))) {
+            if (heatItem.getName() != null && !heatItem.getName().isEmpty()
+                    && heats.stream().noneMatch(h -> h.getId().equals(heatItem.getId()))) {
                 heats.add(heatItem);
             }
         }
-        return new HeatList(slug, heats);
+
+        // сохраняем состояние между страницами
+        previousMonthDayCarry[0] = previousMonthDay;
+        currentDateCarry[0] = currentDate;
+        return heats;
+    }
+
+    private static String detectType(Element link) {
+        String html = link.html();
+        if (html.contains("bi-trophy")) {
+            return "RACE";
+        }
+        if (html.contains("bi-stopwatch")) {
+            return "HEAT";
+        }
+        // fallback по названию
+        String text = link.text().toLowerCase();
+        if (text.contains("финал") || text.contains("гонка")) {
+            return "RACE";
+        }
+        return "HEAT";
     }
 }

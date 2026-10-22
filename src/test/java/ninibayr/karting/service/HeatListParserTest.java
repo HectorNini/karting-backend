@@ -42,4 +42,26 @@ class HeatListParserTest {
         assertThat(list.getHeats().get(1).getDate().substring(0, 4))
                 .isEqualTo(String.valueOf(Integer.parseInt(list.getHeats().get(0).getDate().substring(0, 4)) - 1));
     }
+
+    @Test
+    @DisplayName("parse: определяет тип события по иконке (stopwatch=заезд, trophy=гонка)")
+    void parse_shouldDetectEventType() {
+        Document doc = Jsoup.parse("""
+                <div class="list-group">
+                  <div class="list-group-item heat-list-date"><b>Oct 21</b></div>
+                  <div class="list-group-item">
+                    <a href="/tracks/narvskaya/heats/132660"><strong><i class="bi bi-stopwatch"></i> Heat 47</strong></a>
+                  </div>
+                  <div class="list-group-item">
+                    <a href="/tracks/narvskaya/heats/132359"><strong><i class="bi bi-trophy"></i> Финал 3</strong></a>
+                  </div>
+                </div>
+                """);
+
+        HeatList list = parser.parse(doc, "narvskaya");
+
+        assertThat(list.getHeats()).hasSize(2);
+        assertThat(list.getHeats().get(0).getType()).isEqualTo("HEAT");
+        assertThat(list.getHeats().get(1).getType()).isEqualTo("RACE");
+    }
 }

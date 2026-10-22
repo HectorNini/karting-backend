@@ -21,5 +21,11 @@ public class HeatList {
         private String date;
         private String time;
         private String topResult; // Например: "1. RK (1:14.719)"
+        /** Тип события: HEAT (заезд) или RACE (гонка/финал). */
+        private String type;
+
+        public HeatItem(String id, String name, String date, String time, String topResult) {
+            this(id, name, date, time, topResult, "HEAT");
+        }
     }
 }

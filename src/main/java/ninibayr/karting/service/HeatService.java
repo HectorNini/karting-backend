@@ -44,16 +44,40 @@ public class HeatService {
                 });
     }
 
-    @Scheduled(fixedDelay = 15000)
+    @Scheduled(fixedDelay = 30000)
     @Transactional
     public void updateBackgroundCache() {
         List<HeatEntity> allHeats = heatRepository.findAll();
-        log.info("Фоновое обновление: найдено заездов в БД: {}", allHeats.size());
+        if (allHeats.isEmpty()) {
+            return;
+        }
+        java.time.LocalDate today = java.time.LocalDate.now();
+        java.time.LocalDateTime cutoff = java.time.LocalDateTime.now().minusHours(6);
+        List<HeatEntity> toUpdate = allHeats.stream()
+                .filter(h -> {
+                    if (h.getRaceDate() != null && h.getRaceDate().isEqual(today)) {
+                        return true;
+                    }
+                    if (h.getLastUpdated() != null && h.getLastUpdated().isAfter(cutoff)) {
+                        return true;
+                    }
+                    // если нет дат - обновляем только очень недавно добавленные
+                    if (h.getRaceDate() == null) {
+                        return h.getLastUpdated() != null && h.getLastUpdated().isAfter(java.time.LocalDateTime.now().minusHours(2));
+                    }
+                    return false;
+                })
+                .collect(java.util.stream.Collectors.toList());
 
-        for (HeatEntity entity : allHeats) {
+        log.info("Фоновое обновление: всего в БД: {}, к обновлению (активные/недавние): {}", allHeats.size(), toUpdate.size());
+
+        for (HeatEntity entity : toUpdate) {
             try {
-                // Делегируем синхронизацию правильному сервису
                 heatSyncService.syncHeat(entity.getSiteId());
+                Thread.sleep(2000); // простая задержка чтобы не долбить сайт
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                break;
             } catch (Exception e) {
                 log.error("Ошибка фонового обновления для {}: {}", entity.getSiteId(), e.getMessage());
             }

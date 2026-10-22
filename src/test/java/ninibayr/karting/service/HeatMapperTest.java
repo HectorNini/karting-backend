@@ -138,19 +138,23 @@ class HeatMapperTest {
 
         LapEntity lap1 = new LapEntity();
         lap1.setLapNumber(1);
+        lap1.setRaceLapNumber(1);
         lap1.setColumnIndex(0);
         lap1.setKartNumber(33);
         lap1.setDriver(driver1);
         lap1.setLapTime("2:22.523");
         lap1.setPosition("P1");
+        lap1.setRacePosition("P1");
 
         LapEntity lap2 = new LapEntity();
         lap2.setLapNumber(1);
+        lap2.setRaceLapNumber(1);
         lap2.setColumnIndex(1);
         lap2.setKartNumber(39);
         lap2.setDriver(driver2);
         lap2.setLapTime("2:28.348");
         lap2.setPosition("P2");
+        lap2.setRacePosition("P2");
 
         heatEntity.setLaps(List.of(lap2, lap1));
 
@@ -183,6 +187,7 @@ class HeatMapperTest {
 
         ParsedHeatData.ParsedLap lap = new ParsedHeatData.ParsedLap();
         lap.setLapNumber(1);
+        lap.setRaceLapNumber(1);
         lap.setDriverSiteId("7494");
         lap.setLapTime("2:22.523");
         lap.setPosition("P1");

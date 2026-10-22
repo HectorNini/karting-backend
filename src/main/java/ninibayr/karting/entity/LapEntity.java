@@ -24,6 +24,14 @@ public class LapEntity {
     private Integer kartNumber;
     private Integer columnIndex;
     private Integer lapNumber;
-    private String lapTime;   // Оставляем String, т.к. может быть "DNF" или пусто
-    private String position;  // "P1", "P2" и т.д.
+    private Integer raceLapNumber; // Номер круга в гонке (с учётом смен карта)
+    private Integer stintIndex;    // Номер стинта (смены карта), начиная с 0
+    private String lapTime;      // Форматированное время как на сайте (m:ss.mmm или s.mmm) или "DNF"/пусто
+    private Long lapTimeMillis; // Нормализованное время в миллисекундах для корректной сортировки/сравнения
+    private String position;    // Позиция внутри стинта ("P1", "P2" и т.д.)
+    private String racePosition; // Позиция в гонке на этом круге
+    private String gapToLeader;
+    private String gapToPrevious;
+    private Boolean bestLapOverall;
+    private Boolean bestLapStint;
 }
