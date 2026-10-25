@@ -20,7 +20,8 @@ public class HeatParser {
     public ParsedHeatData parse(String url) throws Exception {
         Document doc = Jsoup.connect(url)
                 .userAgent(userAgent)
-                .timeout(5000)
+                .timeout(10000)
+                .maxBodySize(0)
                 .get();
         return parse(doc);
     }

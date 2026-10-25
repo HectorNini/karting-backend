@@ -46,26 +46,32 @@ public class HeatListParser {
 
         int page = 0;
         while (url != null && page < MAX_PAGES && byId.size() < MAX_HEATS) {
-            Document doc = Jsoup.connect(url)
-                    .userAgent(userAgent)
-                    .timeout(8000)
-                    .get();
+            try {
+                Document doc = Jsoup.connect(url)
+                        .userAgent(userAgent)
+                        .timeout(10000)
+                        .maxBodySize(0)
+                        .get();
 
-            List<HeatList.HeatItem> pageItems = parse(doc, trackSlug, year, carry, carryDate);
-            for (HeatList.HeatItem item : pageItems) {
-                byId.putIfAbsent(item.getId(), item);
-                if (byId.size() >= MAX_HEATS) {
+                List<HeatList.HeatItem> pageItems = parse(doc, trackSlug, year, carry, carryDate);
+                for (HeatList.HeatItem item : pageItems) {
+                    byId.putIfAbsent(item.getId(), item);
+                    if (byId.size() >= MAX_HEATS) {
+                        break;
+                    }
+                }
+
+                // Ссылка на следующую страницу (?start_time=...)
+                String nextHref = findNextHref(doc);
+                if (nextHref == null || nextHref.isBlank()) {
                     break;
                 }
-            }
-
-            // Ссылка на следующую страницу (?start_time=...)
-            String nextHref = findNextHref(doc);
-            if (nextHref == null || nextHref.isBlank()) {
+                url = nextHref.startsWith("http") ? nextHref : baseUrl.substring(0, baseUrl.indexOf("/tracks")) + nextHref;
+                page++;
+            } catch (Exception e) {
+                log.warn("Не удалось загрузить страницу списка заездов: {}", url, e);
                 break;
             }
-            url = nextHref.startsWith("http") ? nextHref : baseUrl.substring(0, baseUrl.indexOf("/tracks")) + nextHref;
-            page++;
         }
 
         List<HeatList.HeatItem> heats = new ArrayList<>(byId.values());

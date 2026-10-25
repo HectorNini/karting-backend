@@ -9,7 +9,10 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.LocalDate;
+import java.time.LocalDateTime;
 import java.util.List;
+import java.util.stream.Collectors;
 
 @Service
 @Slf4j
@@ -19,13 +22,16 @@ public class HeatService {
     private final HeatSyncService heatSyncService;
     private final HeatMapper heatMapper;
     private final HeatListParser heatListParser;
+    private final HeatPrefetchService heatPrefetchService;
 
     public HeatService(HeatRepository heatRepository, HeatSyncService heatSyncService,
-                       HeatMapper heatMapper, HeatListParser heatListParser) {
+                       HeatMapper heatMapper, HeatListParser heatListParser,
+                       HeatPrefetchService heatPrefetchService) {
         this.heatRepository = heatRepository;
         this.heatSyncService = heatSyncService;
         this.heatMapper = heatMapper;
         this.heatListParser = heatListParser;
+        this.heatPrefetchService = heatPrefetchService;
     }
 
     /**
@@ -40,7 +46,12 @@ public class HeatService {
                 .map(heatMapper::toDto)
                 .orElseGet(() -> {
                     log.info("Заезд {} не найден в БД, запускаем синхронизацию...", heatSiteId);
-                    return heatSyncService.syncHeat(heatSiteId);
+                    try {
+                        return heatSyncService.syncHeat(heatSiteId);
+                    } catch (Exception e) {
+                        log.error("Синхронизация заезда {} не удалась: {}", heatSiteId, e.getMessage());
+                        throw new RuntimeException("Не удалось загрузить заезд " + heatSiteId + ". Попробуйте обновить список или повторить позже.", e);
+                    }
                 });
     }
 
@@ -51,10 +62,17 @@ public class HeatService {
         if (allHeats.isEmpty()) {
             return;
         }
-        java.time.LocalDate today = java.time.LocalDate.now();
-        java.time.LocalDateTime cutoff = java.time.LocalDateTime.now().minusHours(6);
+        LocalDate today = LocalDate.now();
+        LocalDateTime now = LocalDateTime.now();
+        LocalDateTime cutoff = now.minusHours(6);
+        // Не синхронизируем повторно заезд чаще, чем раз в 5 минут — иначе
+        // бесконечный цикл «обновили → lastUpdated стал свежим → снова обновили».
+        LocalDateTime minAge = now.minusMinutes(5);
         List<HeatEntity> toUpdate = allHeats.stream()
                 .filter(h -> {
+                    if (h.getLastUpdated() != null && h.getLastUpdated().isAfter(minAge)) {
+                        return false; // обновлён совсем недавно — пропускаем
+                    }
                     if (h.getRaceDate() != null && h.getRaceDate().isEqual(today)) {
                         return true;
                     }
@@ -63,18 +81,18 @@ public class HeatService {
                     }
                     // если нет дат - обновляем только очень недавно добавленные
                     if (h.getRaceDate() == null) {
-                        return h.getLastUpdated() != null && h.getLastUpdated().isAfter(java.time.LocalDateTime.now().minusHours(2));
+                        return h.getLastUpdated() != null && h.getLastUpdated().isAfter(LocalDateTime.now().minusHours(2));
                     }
                     return false;
                 })
-                .collect(java.util.stream.Collectors.toList());
+                .collect(Collectors.toList());
 
         log.info("Фоновое обновление: всего в БД: {}, к обновлению (активные/недавние): {}", allHeats.size(), toUpdate.size());
 
         for (HeatEntity entity : toUpdate) {
             try {
                 heatSyncService.syncHeat(entity.getSiteId());
-                Thread.sleep(2000); // простая задержка чтобы не долбить сайт
+                Thread.sleep(1500); // простая задержка чтобы не долбить сайт
             } catch (InterruptedException ie) {
                 Thread.currentThread().interrupt();
                 break;
@@ -84,7 +102,15 @@ public class HeatService {
         }
     }
 
-    public HeatList getHeatList() throws Exception {
-        return heatListParser.parseCurrentTrack();
+    public HeatList getHeatList() {
+        try {
+            HeatList list = heatListParser.parseCurrentTrack();
+            // Прогреваем кэш последних заездов в фоне, чтобы открытие было мгновенным.
+            heatPrefetchService.prefetchRecentAsync();
+            return list;
+        } catch (Exception e) {
+            log.error("Не удалось получить список заездов", e);
+            throw new RuntimeException("Не удалось получить список заездов. Проверьте подключение к сети.", e);
+        }
     }
 }

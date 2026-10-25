@@ -11,6 +11,7 @@ import org.springframework.stereotype.Component;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -89,6 +90,7 @@ public class HeatMapper {
                         .add(l));
 
         List<HeatData.DriverInfo> drivers = new ArrayList<>();
+        Map<Integer, Long> totalByColumn = new HashMap<>();
         for (Map.Entry<Integer, List<LapEntity>> entry : lapsByColumn.entrySet()) {
             List<LapEntity> driverLaps = entry.getValue();
             driverLaps.sort(Comparator.comparing(
@@ -97,12 +99,6 @@ public class HeatMapper {
             LapEntity firstLap = driverLaps.get(0);
             HeatData.DriverInfo info = toDriverInfo(firstLap, parsedDriversBySiteId, entry.getKey());
 
-            // Последний круг гонщика (с непустым временем) определяет текущую позицию.
-            LapEntity lastLap = driverLaps.stream()
-                    .filter(l -> l.getLapTimeMillis() != null)
-                    .reduce((a, b) -> b)
-                    .orElse(firstLap);
-            info.setPosition(lastLap.getRacePosition());
             info.setTotalLaps((int) driverLaps.stream()
                     .filter(l -> l.getLapTimeMillis() != null)
                     .count());
@@ -112,11 +108,28 @@ public class HeatMapper {
                     .min(Long::compareTo)
                     .orElse(null);
             info.setBestLapMillis(best);
+            // Суммарное время для расчёта итоговой позиции.
+            long totalMillis = driverLaps.stream()
+                    .map(LapEntity::getLapTimeMillis)
+                    .filter(Objects::nonNull)
+                    .mapToLong(Long::longValue)
+                    .sum();
 
             drivers.add(info);
+            totalByColumn.put(entry.getKey(), totalMillis);
         }
 
-        // Сортируем гонщиков по текущей позиции в гонке.
+        // Итоговая позиция: больше кругов — выше; при равенстве кругов — меньше суммарное время.
+        List<HeatData.DriverInfo> ranked = new ArrayList<>(drivers);
+        ranked.sort(Comparator
+                .comparingInt((HeatData.DriverInfo d) -> d.getTotalLaps() == null ? 0 : d.getTotalLaps())
+                .reversed()
+                .thenComparingLong(d -> totalByColumn.getOrDefault(d.getColumnIndex(), Long.MAX_VALUE)));
+        for (int i = 0; i < ranked.size(); i++) {
+            ranked.get(i).setPosition("P" + (i + 1));
+        }
+
+        // Сортируем гонщиков по итоговой позиции в гонке.
         drivers.sort(Comparator.comparingInt(d -> parsePosition(d.getPosition())));
 
         // Строки по номерам кругов в гонке.
