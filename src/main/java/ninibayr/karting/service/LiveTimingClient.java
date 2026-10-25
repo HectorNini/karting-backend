@@ -63,7 +63,6 @@ public class LiveTimingClient {
     private volatile int attempt;
     private volatile String lastError;
     private volatile long connectedAt;
-    private volatile long lastMessageAt;
     private volatile boolean shuttingDown;
 
     public LiveTimingClient(LiveTimingService liveTimingService) {
@@ -180,10 +179,6 @@ public class LiveTimingClient {
         return connectedAt;
     }
 
-    public long getLastMessageAt() {
-        return lastMessageAt;
-    }
-
     // ------------------------------------------------------------------
     // WebSocket listener
     // ------------------------------------------------------------------
@@ -217,7 +212,6 @@ public class LiveTimingClient {
             if (last) {
                 String message = buffer.toString();
                 buffer.setLength(0);
-                lastMessageAt = System.currentTimeMillis();
                 try {
                     liveTimingService.handleRawMessage(message);
                 } catch (Exception e) {

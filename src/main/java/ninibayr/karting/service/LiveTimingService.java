@@ -219,10 +219,6 @@ public class LiveTimingService {
         return snapshot;
     }
 
-    public boolean isLive() {
-        return getSnapshot().isLive();
-    }
-
     public long getTotalMessages() {
         return totalMessages;
     }
