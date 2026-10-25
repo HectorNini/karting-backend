@@ -32,6 +32,12 @@ services:
       KARTING_BASE_URL: ${KARTING_BASE_URL}
       KARTING_USER_AGENT: ${KARTING_USER_AGENT}
 
+      # Live-тайминг (значения по умолчанию можно не задавать в .env)
+      KARTING_LIVE_ENABLED: ${KARTING_LIVE_ENABLED:-true}
+      KARTING_LIVE_WS_URL: ${KARTING_LIVE_WS_URL:-wss://timing.batyrshin.name/ws}
+      KARTING_LIVE_ORIGIN: ${KARTING_LIVE_ORIGIN:-https://timing.batyrshin.name}
+      KARTING_LIVE_STALE_SECONDS: ${KARTING_LIVE_STALE_SECONDS:-180}
+
       SPRING_JPA_HIBERNATE_DDL_AUTO: validate
       SPRING_FLYWAY_ENABLED: "true"
       SPRING_FLYWAY_LOCATIONS: classpath:db/migration

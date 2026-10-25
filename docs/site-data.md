@@ -473,10 +473,118 @@ const f = new URLSearchParams(location.search).get("dev")
 
 * **все времена в миллисекундах** (`time`, `bestTime`, `avgTime`, `gapTime`, `elapsed`);
 * есть **stint-структура** (`stint.number`, `stint.length`, `stint.bestTime`, `stint.avgTime`) — пит-стопы и смены картов;
-* `laps[].stintNum` связывает круг со stint-ом;
+* `laps[].stintNum` связывает круг со stint-ом, `laps[].kartNum` — карт круга (может быть `null`);
 * `position` — текущая позиция в заезде;
-* `mode` — режим (гонка/квалификация);
-* `pitstopTimeThreshold` — порог для учёта пит-стопов.
+* `mode` — режим: `0` — гонка (сайт сортирует по числу кругов, затем по `position`),
+  иначе — по лучшему кругу;
+* `pitstopTimeThreshold` — порог для учёта пит-стопов (в текущих данных приходит `70000`, но
+  для отображения он не нужен);
+* `pitlaneKarts` — номера картов, которые сейчас в питлейне (массив целых);
+* `gapTime` — **интервал до машины впереди** на этом круге (не накопительный разрыв);
+* `bestTime` на уровне пилота обычно `null` — лучшее время считаем сами из `laps[].time`.
+
+### 6.1. Как подключиться и когда сессия «идёт»
+
+Проверено вживую (октябрь 2026):
+
+1. WebSocket требует заголовок `Origin: https://timing.batyrshin.name` — без него соединение
+   отклоняется.
+2. После `onopen` нужно отправить текстовое сообщение **`listen track:{slug}`**
+   (например, `listen track:narvskaya`).
+3. Сервер присылает **одно сообщение — последнее сохранённое состояние трассы**, даже если
+   гонка закончилась много часов назад. Дальше — тишина, пока не начнётся новая сессия.
+4. Во время живой сессии сообщения продолжают приходить (по мере прохождения кругов), а
+   `elapsed` растёт.
+5. Сообщение может приходить несколькими WebSocket-фреймами — их нужно склеивать до
+   `EndOfMessage`.
+6. Отдельного флага «гонка окончена» нет: признак завершения — тишина.
+
+Поэтому «идёт прямо сейчас» определяется эвристикой: **≥ 2 сообщения с одним `id`** и
+последнее не старше `karting.live.stale-seconds` (по умолчанию 180 с). Одно сообщение —
+это реплей последнего состояния, а не живая гонка.
+
+### 6.2. Что сделано в бэкенде
+
+* `LiveTimingClient` — постоянное подключение к `wss://timing.batyrshin.name/ws`
+  (`java.net.http.WebSocket`), заголовок `Origin`, отправка `listen track:{slug}`,
+  переподключение с паузой 2→60 с, склейка фреймов.
+* `LiveTimingService` — разбор JSON (включая производные `totalLaps`, `bestLapTime`,
+  `lastLapTime`, `lastGapTime`), состояние live/waiting/finished, автоматическое завершение
+  по тишине (`@Scheduled` каждые 10 с), STOMP-рассылка, подтягивание завершённой гонки в БД
+  через `HeatPrefetchService`.
+* REST:
+  * `GET /api/live/current` — `{live, status, heat, lastUpdateAt, ageMs, startedAt, messages, staleTimeoutMs}`
+    (`status`: `LIVE` | `WAITING` | `FINISHED` | `IDLE`) — основной эндпоинт для приложения;
+  * `GET /api/live/status` — диагностика подключения (`wsConnected`, `wsUrl`,
+    `reconnectAttempts`, `lastError`, `totalMessages`);
+  * `POST /api/live/stop` — принудительно завершить сессию (тесты/ручное управление);
+  * `POST /api/live/push` и `POST /api/live/push/raw` — подать сообщение вручную (симуляция);
+    оба проходят через тот же конечный автомат, что и реальные данные.
+* STOMP: `/topic/live/{slug}` и `/topic/live/{slug}/{heatId}` — обновления,
+  `/topic/live/{slug}/status` — снимок состояния.
+* Настройки: `karting.live.enabled`, `karting.live.ws-url`, `karting.live.origin`,
+  `karting.live.stale-seconds` (проброшены в `compose.yaml` как `KARTING_LIVE_*`).
+
+Контракт сообщения (реальный снимок «Финал 3», трасса `narvskaya`):
+
+```json
+{
+  "id": 133304,
+  "name": "Финал 3",
+  "elapsed": 444968,
+  "mode": 0,
+  "pitstopTimeThreshold": 70000,
+  "pitlaneKarts": [32, 22],
+  "drivers": [
+    {
+      "driver": { "id": 238911, "name": "KIRILL ZOLOTOV" },
+      "number": 21,
+      "position": 1,
+      "bestTime": null,
+      "stint": { "kart": 29, "number": 7, "bestTime": null, "length": 0, "avgTime": null },
+      "laps": [
+        { "stintNum": 1, "number": 1, "time": 77399, "gapTime": 15, "kartNum": null }
+      ]
+    }
+  ]
+}
+```
+
+Живой пример лежит в тестах: `src/test/resources/live-sample.json`, проверки —
+`LiveTimingServiceTest`.
+
+### 6.3. Симуляция без реальной гонки
+
+```bash
+# отправить один и тот же снимок дважды с новым id — сессия станет live
+curl -X POST http://localhost:8080/api/live/push/raw \
+  -H 'Content-Type: application/json' --data-binary @live-sample.json
+curl -X POST http://localhost:8080/api/live/push/raw \
+  -H 'Content-Type: application/json' --data-binary @live-sample.json
+
+# завершить
+curl -X POST http://localhost:8080/api/live/stop
+
+# проверить
+curl http://localhost:8080/api/live/current
+```
+
+Важно: `id` в снимке должен отличаться от реплея (иначе счётчик сообщений продолжит
+старую сессию). Для наглядности поменяйте `id`, `name` и `elapsed`.
+
+### 6.4. Как это показывает приложение
+
+* `LiveService` опрашивает `GET /api/live/current`: каждые 2 с, пока идёт сессия, и каждые 5 с
+  в тишине; опрос останавливается, когда приложение уходит в фон.
+* На экране списка появляется пульсирующий баннер `LIVE` (название, число пилотов, круг,
+  время, питлейн); тап открывает live-экран.
+* Live-экран: секундомер (докручивается локально), тип события, позиции (по кругам, затем по
+  позиции сервера), карт/стинт/номер, лучший и последний круг, интервал до машины впереди
+  (`gapTime`), значок `ЛУЧШИЙ` для лучшего круга сессии, карты в питлейне, история кругов по
+  тапу на пилота.
+* Когда данные перестают приходить, баннер исчезает, а live-экран показывает «Сессия
+  завершена» и кнопку перехода к обычному заезду.
+
 
 Это **самый богатый источник** на сайте: HTML-страницы не отдают ни позицию в реальном времени, ни gap-ы, ни stint-ы. Минус: автор прямо пишет «протокол вебсокета subject to change», а сам сервер тайминга закрыт.
 
@@ -535,7 +643,10 @@ const f = new URLSearchParams(location.search).get("dev")
   **индекс стинта**, разрывы `.g`/`.ig`, отметки лучших кругов (стинт/заезд);
 * upsert в БД с полным перезаписыванием кругов (`orphanRemoval`);
 * **облегчённая фоновая синхронизация** (`fixedDelay = 30s`, только сегодняшние/недавно обновлённые заезды);
-* **live-тайминг**: приём сырых сообщений (`POST /api/live/push[/raw]`) и ретрансляция в STOMP `/topic/live/**`;
+* **live-тайминг**: постоянное подключение к WebSocket сайта (`LiveTimingClient`), определение
+  «гонка идёт прямо сейчас» (≥2 сообщения + отсутствие тишины 180 с), `GET /api/live/current`,
+  `GET /api/live/status`, `POST /api/live/stop`, ретрансляция в STOMP `/topic/live/**`,
+  ручная подача сообщений (`POST /api/live/push[/raw]`), подтягивание завершённой гонки в БД;
 * Swagger UI через springdoc.
 
 ### Доступно на сайте, но не используется
