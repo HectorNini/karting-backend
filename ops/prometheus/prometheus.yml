@@ -1,0 +1,26 @@
+# Локальный сбор метрик для dev/пет-проекта.
+# Все цели живут в сети docker compose, наружу порты не публикуются.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    monitor: karting-local
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # Spring Boot Actuator + Micrometer (management.server.port=8081)
+  - job_name: karting-backend
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ["app:8081"]
+
+  - job_name: postgres
+    static_configs:
+      - targets: ["postgres-exporter:9187"]
+
+  - job_name: node
+    static_configs:
+      - targets: ["node-exporter:9100"]
