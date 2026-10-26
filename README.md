@@ -41,6 +41,23 @@ curl http://localhost:8080/api/live/status
 | `KARTING_LIVE_ORIGIN` | `https://timing.batyrshin.name` | обязательный заголовок `Origin` |
 | `KARTING_LIVE_STALE_SECONDS` | `180` | тишина, после которой сессия считается завершённой |
 | `POSTGRES_DB` / `POSTGRES_USER` / `POSTGRES_PASSWORD` | — | доступ к БД |
+| `GRAFANA_ADMIN_USER` / `GRAFANA_ADMIN_PASSWORD` | `admin` / `admin` | вход в Grafana |
+
+## Мониторинг
+
+Метрики (Prometheus + Grafana + postgres_exporter + node_exporter) вынесены в
+профиль `observability` и по умолчанию не запускаются:
+
+```bash
+docker compose --profile observability up -d
+```
+
+* Grafana — http://localhost:3000 (дашборд «Karting — нагрузка»);
+* Prometheus — http://localhost:9090;
+* Actuator — http://localhost:8081/actuator/prometheus (только `127.0.0.1`).
+
+Что собирается, какие доменные метрики есть и как добавить свои — в
+[`docs/monitoring.md`](docs/monitoring.md).
 
 ## REST API
 
