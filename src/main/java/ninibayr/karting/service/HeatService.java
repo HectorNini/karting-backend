@@ -5,6 +5,7 @@ import ninibayr.karting.dto.HeatData;
 import ninibayr.karting.dto.HeatList;
 import ninibayr.karting.entity.HeatEntity;
 import ninibayr.karting.repository.HeatRepository;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -43,7 +44,15 @@ public class HeatService {
     @Transactional(readOnly = true)
     public HeatData getHeatData(String heatSiteId) {
         return heatRepository.findBySiteId(heatSiteId)
-                .map(heatMapper::toDto)
+                .map(heat -> {
+                    // Данные старого парсера: стинтов ещё нет. Отдаём кэш сразу,
+                    // а в фоне перечитываем заезд — приложение обновляется каждые 5 с.
+                    if (heat.getStints().isEmpty() && !heat.getLaps().isEmpty()) {
+                        log.info("Заезд {} без стинтов — ставим на пересинхронизацию", heatSiteId);
+                        heatPrefetchService.resyncOneAsync(heatSiteId);
+                    }
+                    return heatMapper.toDto(heat);
+                })
                 .orElseGet(() -> {
                     log.info("Заезд {} не найден в БД, запускаем синхронизацию...", heatSiteId);
                     try {
@@ -53,6 +62,26 @@ public class HeatService {
                         throw new RuntimeException("Не удалось загрузить заезд " + heatSiteId + ". Попробуйте обновить список или повторить позже.", e);
                     }
                 });
+    }
+
+    /**
+     * Перечитывает с сайта заезды, сохранённые без стинтов (старый парсер).
+     * Возвращает число успешно обновлённых.
+     */
+    public int resyncMissingStints(int limit) {
+        int effective = Math.max(1, Math.min(limit, 200));
+        List<HeatEntity> heats = heatRepository.findMissingStints(PageRequest.of(0, effective));
+        int updated = 0;
+        for (HeatEntity heat : heats) {
+            try {
+                heatSyncService.syncHeat(heat.getSiteId());
+                updated++;
+            } catch (Exception e) {
+                log.warn("Пересинхронизация заезда {} не удалась: {}", heat.getSiteId(), e.getMessage());
+            }
+        }
+        log.info("Пересинхронизация стинтов: обновлено {} из {}", updated, heats.size());
+        return updated;
     }
 
     @Scheduled(fixedDelay = 30000)

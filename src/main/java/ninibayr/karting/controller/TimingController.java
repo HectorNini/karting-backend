@@ -34,4 +34,13 @@ public class TimingController {
     public HeatData getHeatData(@PathVariable String id) {
         return heatService.getHeatData(id);
     }
+
+    @Operation(summary = "Пересинхронизировать старые заезды",
+            description = "Перечитывает с сайта до `limit` заездов, у которых есть круги, но нет данных о стинтах (картах)")
+    @PostMapping("/heats/resync")
+    public java.util.Map<String, Object> resyncMissingStints(
+            @RequestParam(defaultValue = "20") int limit) {
+        int updated = heatService.resyncMissingStints(limit);
+        return java.util.Map.of("status", "ok", "updated", updated);
+    }
 }

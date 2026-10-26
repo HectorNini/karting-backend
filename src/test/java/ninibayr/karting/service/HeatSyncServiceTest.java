@@ -75,7 +75,7 @@ class HeatSyncServiceTest {
         HeatData expectedDto = new HeatData("Heat 33 ДЕТИ", null, null, List.of(), List.of());
 
         when(trackRepository.findBySlug(TRACK_SLUG)).thenReturn(Optional.of(testTrack));
-        when(heatRepository.findBySiteId(heatSiteId)).thenReturn(Optional.empty());
+        when(heatRepository.findBySiteIdForUpdate(heatSiteId)).thenReturn(Optional.empty());
         when(heatParser.parse(url)).thenReturn(parsedData);
         when(heatMapper.toDto(any(HeatEntity.class))).thenReturn(expectedDto);
 
@@ -85,7 +85,7 @@ class HeatSyncServiceTest {
         assertThat(result.getHeatName()).isEqualTo("Heat 33 ДЕТИ");
 
         verify(trackRepository).findBySlug(TRACK_SLUG);
-        verify(heatRepository).findBySiteId(heatSiteId);
+        verify(heatRepository).findBySiteIdForUpdate(heatSiteId);
         verify(heatParser).parse(url);
         verify(heatMapper).updateEntity(any(HeatEntity.class), eq(parsedData), eq(testTrack));
         verify(heatRepository).save(any(HeatEntity.class));
@@ -109,7 +109,7 @@ class HeatSyncServiceTest {
         HeatData expectedDto = new HeatData("Heat 33 ДЕТИ (обновлено)", null, null, List.of(), List.of());
 
         when(trackRepository.findBySlug(TRACK_SLUG)).thenReturn(Optional.of(testTrack));
-        when(heatRepository.findBySiteId(heatSiteId)).thenReturn(Optional.of(existingHeat));
+        when(heatRepository.findBySiteIdForUpdate(heatSiteId)).thenReturn(Optional.of(existingHeat));
         when(heatParser.parse(url)).thenReturn(parsedData);
         when(heatMapper.toDto(existingHeat)).thenReturn(expectedDto);
 
@@ -141,7 +141,7 @@ class HeatSyncServiceTest {
         String url = BASE_URL + "/" + TRACK_SLUG + "/heats/" + heatSiteId;
 
         when(trackRepository.findBySlug(TRACK_SLUG)).thenReturn(Optional.of(testTrack));
-        when(heatRepository.findBySiteId(heatSiteId)).thenReturn(Optional.empty());
+        when(heatRepository.findBySiteIdForUpdate(heatSiteId)).thenReturn(Optional.empty());
         when(heatParser.parse(url)).thenThrow(new RuntimeException("Сайт недоступен"));
 
         assertThatThrownBy(() -> heatSyncService.syncHeat(heatSiteId))

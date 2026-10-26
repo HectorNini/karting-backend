@@ -40,8 +40,11 @@ public class HeatSyncService {
             TrackEntity track = trackRepository.findBySlug(trackSlug)
                     .orElseThrow(() -> new RuntimeException("Трасса '" + trackSlug + "' не найдена в БД"));
 
-            // 1. ПАТТЕРН UPSERT: Находим существующий или готовим новый
-            HeatEntity heatEntity = heatRepository.findBySiteId(heatSiteId).orElseGet(() -> {
+            // 1. ПАТТЕРН UPSERT: Находим существующий или готовим новый.
+            // Блокируем строку заезда, чтобы две синхронизации одного заезда
+            // (шедулер + открытие в приложении) не шли параллельно и не ловили
+            // конфликт уникальности стинтов.
+            HeatEntity heatEntity = heatRepository.findBySiteIdForUpdate(heatSiteId).orElseGet(() -> {
                 HeatEntity newHeat = new HeatEntity();
                 newHeat.setSiteId(heatSiteId);
                 newHeat.setTrack(track);
