@@ -10,7 +10,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 class HeatListParserTest {
 
-    private final HeatListParser parser = new HeatListParser();
+    private final HeatListParser parser = new HeatListParser(new io.micrometer.core.instrument.simple.SimpleMeterRegistry());
 
     @Test
     @DisplayName("parse: собирает ISO-дату и переносит год на границе января и декабря")

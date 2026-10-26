@@ -22,7 +22,7 @@ class LiveTimingServiceTest {
     @BeforeEach
     void setUp() throws Exception {
         // messagingTemplate = null: в тестах рассылка не нужна
-        service = new LiveTimingService(null, new ObjectMapper(), null, "narvskaya", STALE_MS / 1000);
+        service = new LiveTimingService(null, new ObjectMapper(), null, "narvskaya", STALE_MS / 1000, new io.micrometer.core.instrument.simple.SimpleMeterRegistry());
         try (InputStream in = getClass().getClassLoader().getResourceAsStream("live-sample.json")) {
             assertThat(in).isNotNull();
             sampleJson = new String(in.readAllBytes(), StandardCharsets.UTF_8);
@@ -120,7 +120,7 @@ class LiveTimingServiceTest {
     @DisplayName("live: при смене сессии сохраняется завершившаяся гонка, а не новая")
     void newHeatId_persistsPreviousHeat() {
         HeatPrefetchService prefetch = org.mockito.Mockito.mock(HeatPrefetchService.class);
-        LiveTimingService svc = new LiveTimingService(null, new ObjectMapper(), prefetch, "narvskaya", 180);
+        LiveTimingService svc = new LiveTimingService(null, new ObjectMapper(), prefetch, "narvskaya", 180, new io.micrometer.core.instrument.simple.SimpleMeterRegistry());
 
         LiveHeatUpdate first = svc.parseFromJson(sampleJson);
         LiveHeatUpdate second = svc.parseFromJson(sampleJson.replace("\"id\":133304", "\"id\":133305"));

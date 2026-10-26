@@ -1,5 +1,7 @@
 package ninibayr.karting.service;
 
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
 import lombok.extern.slf4j.Slf4j;
 import ninibayr.karting.dto.HeatData;
 import ninibayr.karting.entity.HeatEntity;
@@ -11,6 +13,8 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.util.concurrent.TimeUnit;
+
 @Service
 @Slf4j
 public class HeatSyncService {
@@ -19,6 +23,7 @@ public class HeatSyncService {
     private final HeatRepository heatRepository;
     private final HeatParser heatParser;
     private final HeatMapper heatMapper;
+    private final MeterRegistry meterRegistry;
 
     @Value("${karting.track.slug}")
     private String trackSlug;
@@ -27,15 +32,27 @@ public class HeatSyncService {
     private String baseUrl;
 
     public HeatSyncService(TrackRepository trackRepository, HeatRepository heatRepository,
-                           HeatParser heatParser, HeatMapper heatMapper) {
+                           HeatParser heatParser, HeatMapper heatMapper,
+                           MeterRegistry meterRegistry) {
         this.trackRepository = trackRepository;
         this.heatRepository = heatRepository;
         this.heatParser = heatParser;
         this.heatMapper = heatMapper;
+        this.meterRegistry = meterRegistry;
     }
 
     @Transactional(propagation = Propagation.REQUIRES_NEW)
     public HeatData syncHeat(String heatSiteId) {
+        long startedAt = System.nanoTime();
+        try {
+            return doSyncHeat(heatSiteId, startedAt);
+        } catch (RuntimeException e) {
+            recordSync("error", startedAt);
+            throw e;
+        }
+    }
+
+    private HeatData doSyncHeat(String heatSiteId, long startedAt) {
         try {
             TrackEntity track = trackRepository.findBySlug(trackSlug)
                     .orElseThrow(() -> new RuntimeException("Трасса '" + trackSlug + "' не найдена в БД"));
@@ -66,11 +83,21 @@ public class HeatSyncService {
             log.info("Успешно синхронизировано (обновлено): {} (ID: {}), кругов: {}",
                     heatEntity.getName(), heatSiteId, heatEntity.getLaps().size());
 
+            recordSync("ok", startedAt);
             return heatMapper.toDto(heatEntity);
 
         } catch (Exception e) {
             log.error("Критическая ошибка синхронизации для {}: {}", heatSiteId, e.getMessage(), e);
             throw new RuntimeException("Не удалось получить данные для заезда " + heatSiteId, e);
         }
+    }
+
+    private void recordSync(String result, long startedAtNanos) {
+        Timer.builder("karting.heat.sync")
+                .description("Синхронизация заезда с сайтом (fetch + парсинг + запись в БД)")
+                .tag("result", result)
+                .publishPercentileHistogram()
+                .register(meterRegistry)
+                .record(System.nanoTime() - startedAtNanos, TimeUnit.NANOSECONDS);
     }
 }

@@ -48,7 +48,7 @@ class HeatSyncServiceTest {
 
     @BeforeEach
     void setUp() {
-        heatSyncService = new HeatSyncService(trackRepository, heatRepository, heatParser, heatMapper);
+        heatSyncService = new HeatSyncService(trackRepository, heatRepository, heatParser, heatMapper, new io.micrometer.core.instrument.simple.SimpleMeterRegistry());
         ReflectionTestUtils.setField(heatSyncService, "trackSlug", TRACK_SLUG);
         ReflectionTestUtils.setField(heatSyncService, "baseUrl", BASE_URL);
 

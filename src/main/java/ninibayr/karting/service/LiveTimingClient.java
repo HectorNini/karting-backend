@@ -1,5 +1,8 @@
 package ninibayr.karting.service;
 
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.Gauge;
+import io.micrometer.core.instrument.MeterRegistry;
 import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -57,6 +60,7 @@ public class LiveTimingClient {
 
     private final AtomicBoolean connecting = new AtomicBoolean(false);
     private final AtomicBoolean reconnectScheduled = new AtomicBoolean(false);
+    private final Counter reconnects;
 
     private volatile WebSocket socket;
     private volatile boolean connected;
@@ -65,8 +69,12 @@ public class LiveTimingClient {
     private volatile long connectedAt;
     private volatile boolean shuttingDown;
 
-    public LiveTimingClient(LiveTimingService liveTimingService) {
+    public LiveTimingClient(LiveTimingService liveTimingService, MeterRegistry meterRegistry) {
         this.liveTimingService = liveTimingService;
+        Gauge.builder("karting.live.ws.connected", this, c -> c.connected ? 1 : 0)
+                .description("Подключён ли WebSocket к live-таймингу (1/0)")
+                .register(meterRegistry);
+        this.reconnects = meterRegistry.counter("karting.live.ws.reconnects");
     }
 
     @EventListener(ApplicationReadyEvent.class)
@@ -126,6 +134,7 @@ public class LiveTimingClient {
         int index = Math.min(attempt, BACKOFF_MS.length - 1);
         long delay = BACKOFF_MS[index];
         attempt++;
+        reconnects.increment();
         log.info("Live WS: переподключение через {} мс (попытка {})", delay, attempt);
         scheduler.schedule(() -> {
             reconnectScheduled.set(false);

@@ -1,5 +1,7 @@
 package ninibayr.karting.service;
 
+import io.micrometer.core.instrument.Gauge;
+import io.micrometer.core.instrument.MeterRegistry;
 import lombok.extern.slf4j.Slf4j;
 import ninibayr.karting.dto.HeatList;
 import ninibayr.karting.entity.HeatEntity;
@@ -11,8 +13,9 @@ import org.springframework.stereotype.Service;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Фоновый «прогрев» кэша: заранее подтягивает с сайта заезды из списка,
@@ -33,7 +36,8 @@ public class HeatPrefetchService {
     private final HeatSyncService heatSyncService;
     private final HeatListParser heatListParser;
 
-    private final ExecutorService executor = Executors.newSingleThreadExecutor(r -> {
+    private final ThreadPoolExecutor executor = new ThreadPoolExecutor(
+            1, 1, 0L, TimeUnit.MILLISECONDS, new LinkedBlockingQueue<>(), r -> {
         Thread t = new Thread(r, "heat-prefetch");
         t.setDaemon(true);
         return t;
@@ -47,10 +51,18 @@ public class HeatPrefetchService {
 
     public HeatPrefetchService(HeatRepository heatRepository,
                                HeatSyncService heatSyncService,
-                               HeatListParser heatListParser) {
+                               HeatListParser heatListParser,
+                               MeterRegistry meterRegistry) {
         this.heatRepository = heatRepository;
         this.heatSyncService = heatSyncService;
         this.heatListParser = heatListParser;
+        Gauge.builder("karting.prefetch.queue", executor,
+                        ex -> ex.getQueue().size())
+                .description("Сколько заездов ждёт в очереди фонового прогрева")
+                .register(meterRegistry);
+        Gauge.builder("karting.prefetch.scheduled", scheduled, Set::size)
+                .description("Сколько заездов уже поставлено на прогрев")
+                .register(meterRegistry);
     }
 
     /**

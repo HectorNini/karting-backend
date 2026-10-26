@@ -1,5 +1,6 @@
 package ninibayr.karting.service;
 
+import io.micrometer.core.instrument.MeterRegistry;
 import lombok.extern.slf4j.Slf4j;
 import ninibayr.karting.dto.HeatData;
 import ninibayr.karting.dto.HeatList;
@@ -24,15 +25,20 @@ public class HeatService {
     private final HeatMapper heatMapper;
     private final HeatListParser heatListParser;
     private final HeatPrefetchService heatPrefetchService;
+    private final MeterRegistry meterRegistry;
 
     public HeatService(HeatRepository heatRepository, HeatSyncService heatSyncService,
                        HeatMapper heatMapper, HeatListParser heatListParser,
-                       HeatPrefetchService heatPrefetchService) {
+                       HeatPrefetchService heatPrefetchService, MeterRegistry meterRegistry) {
         this.heatRepository = heatRepository;
         this.heatSyncService = heatSyncService;
         this.heatMapper = heatMapper;
         this.heatListParser = heatListParser;
         this.heatPrefetchService = heatPrefetchService;
+        this.meterRegistry = meterRegistry;
+        // Регистрируем заранее, чтобы в Prometheus были нули, а не «нет данных».
+        meterRegistry.counter("karting.heat.cache.requests", "hit", "true");
+        meterRegistry.counter("karting.heat.cache.requests", "hit", "false");
     }
 
     /**
@@ -45,6 +51,7 @@ public class HeatService {
     public HeatData getHeatData(String heatSiteId) {
         return heatRepository.findBySiteId(heatSiteId)
                 .map(heat -> {
+                    meterRegistry.counter("karting.heat.cache.requests", "hit", "true").increment();
                     // Данные старого парсера: стинтов ещё нет. Отдаём кэш сразу,
                     // а в фоне перечитываем заезд — приложение обновляется каждые 5 с.
                     if (heat.getStints().isEmpty() && !heat.getLaps().isEmpty()) {
@@ -54,6 +61,7 @@ public class HeatService {
                     return heatMapper.toDto(heat);
                 })
                 .orElseGet(() -> {
+                    meterRegistry.counter("karting.heat.cache.requests", "hit", "false").increment();
                     log.info("Заезд {} не найден в БД, запускаем синхронизацию...", heatSiteId);
                     try {
                         return heatSyncService.syncHeat(heatSiteId);

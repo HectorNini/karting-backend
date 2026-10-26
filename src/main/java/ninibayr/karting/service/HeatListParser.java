@@ -1,5 +1,7 @@
 package ninibayr.karting.service;
 
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
 import lombok.extern.slf4j.Slf4j;
 import ninibayr.karting.dto.HeatList;
 import org.jsoup.Jsoup;
@@ -16,6 +18,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 
 @Component
 @Slf4j
@@ -35,7 +38,26 @@ public class HeatListParser {
     @Value("${karting.base-url}")
     private String baseUrl;
 
+    private final MeterRegistry meterRegistry;
+
+    public HeatListParser(MeterRegistry meterRegistry) {
+        this.meterRegistry = meterRegistry;
+        meterRegistry.counter("karting.site.fetch.failures", "kind", "list");
+    }
+
     public HeatList parseCurrentTrack() throws Exception {
+        Timer.Sample sample = Timer.start(meterRegistry);
+        try {
+            return doParseCurrentTrack();
+        } finally {
+            sample.stop(Timer.builder("karting.list.parse")
+                    .description("Полный цикл разбора списка заездов (все страницы)")
+                    .publishPercentileHistogram()
+                    .register(meterRegistry));
+        }
+    }
+
+    private HeatList doParseCurrentTrack() throws Exception {
         // Ключ — id заезда, значение — элемент. LinkedHashMap сохраняет порядок "свежие сверху".
         Map<String, HeatList.HeatItem> byId = new LinkedHashMap<>();
 
@@ -46,12 +68,15 @@ public class HeatListParser {
 
         int page = 0;
         while (url != null && page < MAX_PAGES && byId.size() < MAX_HEATS) {
+            long pageStartedAt = System.nanoTime();
             try {
                 Document doc = Jsoup.connect(url)
                         .userAgent(userAgent)
                         .timeout(10000)
                         .maxBodySize(0)
                         .get();
+                recordFetch("ok", pageStartedAt);
+                meterRegistry.counter("karting.list.pages").increment();
 
                 List<HeatList.HeatItem> pageItems = parse(doc, trackSlug, year, carry, carryDate);
                 for (HeatList.HeatItem item : pageItems) {
@@ -69,6 +94,8 @@ public class HeatListParser {
                 url = nextHref.startsWith("http") ? nextHref : baseUrl.substring(0, baseUrl.indexOf("/tracks")) + nextHref;
                 page++;
             } catch (Exception e) {
+                recordFetch("error", pageStartedAt);
+                meterRegistry.counter("karting.site.fetch.failures", "kind", "list").increment();
                 log.warn("Не удалось загрузить страницу списка заездов: {}", url, e);
                 break;
             }
@@ -78,7 +105,18 @@ public class HeatListParser {
         if (heats.size() > MAX_HEATS) {
             heats = heats.subList(0, MAX_HEATS);
         }
+        meterRegistry.summary("karting.list.heats").record(heats.size());
         return new HeatList(trackSlug, heats);
+    }
+
+    private void recordFetch(String result, long startedAtNanos) {
+        Timer.builder("karting.site.fetch")
+                .description("Загрузка HTML-страницы с сайта тайминга")
+                .tag("kind", "list")
+                .tag("result", result)
+                .publishPercentileHistogram()
+                .register(meterRegistry)
+                .record(System.nanoTime() - startedAtNanos, TimeUnit.NANOSECONDS);
     }
 
     private static String findNextHref(Document doc) {

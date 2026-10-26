@@ -2,6 +2,9 @@ package ninibayr.karting.service;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.Gauge;
+import io.micrometer.core.instrument.MeterRegistry;
 import lombok.extern.slf4j.Slf4j;
 import ninibayr.karting.dto.LiveHeatUpdate;
 import ninibayr.karting.dto.LiveSnapshot;
@@ -46,6 +49,9 @@ public class LiveTimingService {
     private final HeatPrefetchService heatPrefetchService;
     private final String trackSlug;
     private final long staleTimeoutMs;
+    private final Counter messages;
+    private final Counter parseErrors;
+    private final Counter sessions;
 
     private final Object lock = new Object();
 
@@ -70,12 +76,24 @@ public class LiveTimingService {
                              ObjectMapper objectMapper,
                              HeatPrefetchService heatPrefetchService,
                              @Value("${karting.track.slug:narvskaya}") String trackSlug,
-                             @Value("${karting.live.stale-seconds:180}") long staleSeconds) {
+                             @Value("${karting.live.stale-seconds:180}") long staleSeconds,
+                             MeterRegistry meterRegistry) {
         this.messagingTemplate = messagingTemplate;
         this.objectMapper = objectMapper;
         this.heatPrefetchService = heatPrefetchService;
         this.trackSlug = trackSlug;
         this.staleTimeoutMs = Math.max(10, staleSeconds) * 1000L;
+        this.messages = meterRegistry.counter("karting.live.messages");
+        this.parseErrors = meterRegistry.counter("karting.live.parse.errors");
+        this.sessions = meterRegistry.counter("karting.live.sessions");
+        Gauge.builder("karting.live.active", this, s -> s.live ? 1 : 0)
+                .description("Идёт ли live-сессия сейчас (1/0)")
+                .register(meterRegistry);
+        Gauge.builder("karting.live.message.age.seconds", this,
+                        s -> s.lastMessageAt == 0 ? -1
+                                : (System.currentTimeMillis() - s.lastMessageAt) / 1000.0)
+                .description("Сколько секунд назад пришло последнее live-сообщение")
+                .register(meterRegistry);
     }
 
     // ------------------------------------------------------------------
@@ -110,6 +128,7 @@ public class LiveTimingService {
 
             boolean newSession = update.getHeatId() != null && !update.getHeatId().equals(currentHeatId);
             if (newSession) {
+                sessions.increment();
                 currentHeatId = update.getHeatId();
                 messagesForCurrentHeat = 0;
                 live = false;
@@ -119,6 +138,7 @@ public class LiveTimingService {
 
             messagesForCurrentHeat++;
             totalMessages++;
+            messages.increment();
             lastMessageAt = now;
 
             // Сайт присылает не полное состояние, а дельту (обычно один гонщик
@@ -467,6 +487,7 @@ public class LiveTimingService {
             update.setDrivers(drivers);
             return update;
         } catch (Exception e) {
+            parseErrors.increment();
             log.debug("Не удалось разобрать live-тайминг: {}", e.getMessage());
             return null;
         }

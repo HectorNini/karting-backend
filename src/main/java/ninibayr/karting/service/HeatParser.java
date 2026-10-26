@@ -1,5 +1,7 @@
 package ninibayr.karting.service;
 
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
 import lombok.extern.slf4j.Slf4j;
 import org.jsoup.Jsoup;
 import org.jsoup.nodes.Document;
@@ -15,6 +17,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -22,16 +25,42 @@ import java.util.regex.Pattern;
 @Slf4j
 public class HeatParser {
 
+    private final MeterRegistry meterRegistry;
+
     @Value("${karting.user-agent}")
     private String userAgent;
 
+    public HeatParser(MeterRegistry meterRegistry) {
+        this.meterRegistry = meterRegistry;
+        meterRegistry.counter("karting.site.fetch.failures", "kind", "heat");
+    }
+
     public ParsedHeatData parse(String url) throws Exception {
-        Document doc = Jsoup.connect(url)
-                .userAgent(userAgent)
-                .timeout(10000)
-                .maxBodySize(0)
-                .get();
+        long startedAt = System.nanoTime();
+        Document doc;
+        try {
+            doc = Jsoup.connect(url)
+                    .userAgent(userAgent)
+                    .timeout(10000)
+                    .maxBodySize(0)
+                    .get();
+        } catch (Exception e) {
+            recordFetch("heat", "error", startedAt);
+            meterRegistry.counter("karting.site.fetch.failures", "kind", "heat").increment();
+            throw e;
+        }
+        recordFetch("heat", "ok", startedAt);
         return parse(doc);
+    }
+
+    private void recordFetch(String kind, String result, long startedAtNanos) {
+        Timer.builder("karting.site.fetch")
+                .description("Загрузка HTML-страницы с сайта тайминга")
+                .tag("kind", kind)
+                .tag("result", result)
+                .publishPercentileHistogram()
+                .register(meterRegistry)
+                .record(System.nanoTime() - startedAtNanos, TimeUnit.NANOSECONDS);
     }
 
     ParsedHeatData parse(Document doc) {
