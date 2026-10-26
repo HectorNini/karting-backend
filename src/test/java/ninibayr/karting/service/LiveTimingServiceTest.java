@@ -117,6 +117,23 @@ class LiveTimingServiceTest {
     }
 
     @Test
+    @DisplayName("live: при смене сессии сохраняется завершившаяся гонка, а не новая")
+    void newHeatId_persistsPreviousHeat() {
+        HeatPrefetchService prefetch = org.mockito.Mockito.mock(HeatPrefetchService.class);
+        LiveTimingService svc = new LiveTimingService(null, new ObjectMapper(), prefetch, "narvskaya", 180);
+
+        LiveHeatUpdate first = svc.parseFromJson(sampleJson);
+        LiveHeatUpdate second = svc.parseFromJson(sampleJson.replace("\"id\":133304", "\"id\":133305"));
+
+        svc.handleUpdate(first, 1_000_000L);
+        svc.handleUpdate(first, 1_001_000L);
+        svc.handleUpdate(second, 1_002_000L);
+
+        org.mockito.Mockito.verify(prefetch).resyncOneAsync("133304");
+        org.mockito.Mockito.verifyNoMoreInteractions(prefetch);
+    }
+
+    @Test
     @DisplayName("stop: ручная остановка снимает флаг live")
     void stop_clearsLiveFlag() {
         LiveHeatUpdate update = service.parseFromJson(sampleJson);
@@ -151,5 +168,136 @@ class LiveTimingServiceTest {
         assertThat(service.parseFromJson("not json")).isNull();
         assertThat(service.parseFromJson("[]")).isNull();
         assertThat(service.parseFromJson("{}")).isNotNull();
+    }
+
+    // ------------------------------------------------------------------
+    // Слияние дельт
+    // ------------------------------------------------------------------
+
+    private static final String HEAT_777_FULL = """
+            {"id":777,"name":"Heat 7","elapsed":10000,"mode":0,"pitstopTimeThreshold":70000,
+             "pitlaneKarts":[10],
+             "drivers":[
+               {"driver":{"id":"1","name":"A"},"number":1,"position":1,
+                "stint":{"kart":9,"number":1,"length":1},
+                "laps":[{"stintNum":1,"number":1,"time":30000}]},
+               {"driver":{"id":"2","name":"B"},"number":2,"position":2,
+                "stint":{"kart":20,"number":1,"length":1},
+                "laps":[{"stintNum":1,"number":1,"time":31000}]}
+             ]}
+            """;
+
+    @Test
+    @DisplayName("merge: дельта не затирает остальных гонщиков и копит круги")
+    void merge_keepsOtherDrivers_andAppendsLaps() {
+        service.handleUpdate(service.parseFromJson(HEAT_777_FULL), 1_000_000L);
+        service.handleUpdate(service.parseFromJson("""
+                {"id":777,"drivers":[
+                  {"driver":{"id":"1","name":"A"},"position":1,
+                   "stint":{"kart":9,"number":1,"length":2},
+                   "laps":[{"stintNum":1,"number":2,"time":29500}]}
+                ]}
+                """), 1_001_000L);
+
+        LiveHeatUpdate heat = service.getSnapshot(1_001_100L).getHeat();
+
+        assertThat(heat.getDrivers()).hasSize(2);
+        assertThat(heat.getHeatName()).isEqualTo("Heat 7");
+
+        LiveHeatUpdate.LiveDriver a = heat.getDrivers().get(0);
+        assertThat(a.getLaps()).hasSize(2);
+        assertThat(a.getTotalLaps()).isEqualTo(2);
+        assertThat(a.getBestLapTime()).isEqualTo(29_500L);
+        assertThat(a.getLastLapNumber()).isEqualTo(2);
+
+        LiveHeatUpdate.LiveDriver b = heat.getDrivers().get(1);
+        assertThat(b.getLaps()).hasSize(1);
+        assertThat(b.getTotalLaps()).isEqualTo(1);
+    }
+
+    @Test
+    @DisplayName("merge: отсутствующие поля дельты не сбрасывают состояние")
+    void merge_absentFields_areKept() {
+        service.handleUpdate(service.parseFromJson(HEAT_777_FULL), 1_000_000L);
+        service.handleUpdate(service.parseFromJson("""
+                {"id":777,"drivers":[
+                  {"driver":{"id":"1"},"laps":[{"stintNum":1,"number":2,"time":29500}]}
+                ]}
+                """), 1_001_000L);
+
+        LiveHeatUpdate heat = service.getSnapshot(1_001_100L).getHeat();
+
+        assertThat(heat.getElapsed()).isEqualTo(10_000L);
+        assertThat(heat.getPitstopTimeThreshold()).isEqualTo(70_000L);
+        assertThat(heat.getPitlaneKarts()).containsExactly(10);
+    }
+
+    @Test
+    @DisplayName("merge: явный пустой pitlaneKarts очищает питлейн")
+    void merge_emptyPitlane_clears() {
+        service.handleUpdate(service.parseFromJson(HEAT_777_FULL), 1_000_000L);
+        service.handleUpdate(service.parseFromJson("""
+                {"id":777,"pitlaneKarts":[],"drivers":[]}
+                """), 1_001_000L);
+
+        assertThat(service.getSnapshot(1_001_100L).getHeat().getPitlaneKarts()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("merge: одинаковый номер круга не дублируется")
+    void merge_doesNotDuplicateLap() {
+        service.handleUpdate(service.parseFromJson(HEAT_777_FULL), 1_000_000L);
+        String delta = """
+                {"id":777,"drivers":[
+                  {"driver":{"id":"1"},"laps":[{"stintNum":1,"number":2,"time":29500}]}
+                ]}
+                """;
+        service.handleUpdate(service.parseFromJson(delta), 1_001_000L);
+        service.handleUpdate(service.parseFromJson(delta), 1_002_000L);
+
+        assertThat(service.getSnapshot(1_002_100L).getHeat().getDrivers().get(0).getLaps())
+                .hasSize(2);
+    }
+
+    @Test
+    @DisplayName("merge: карт проставляется каждому кругу по номеру стинта")
+    void merge_fillsKartForEveryLap() {
+        service.handleUpdate(service.parseFromJson("""
+                {"id":888,"drivers":[
+                  {"driver":{"id":"1"},"stint":{"kart":9,"number":1,"length":1},
+                   "laps":[{"stintNum":1,"number":1,"time":30000}]}
+                ]}
+                """), 1_000_000L);
+        service.handleUpdate(service.parseFromJson("""
+                {"id":888,"drivers":[
+                  {"driver":{"id":"1"},"stint":{"kart":101,"number":2,"length":1},
+                   "laps":[{"stintNum":2,"number":2,"time":31000}]}
+                ]}
+                """), 1_001_000L);
+
+        LiveHeatUpdate.LiveDriver driver = service.getSnapshot(1_001_100L).getHeat().getDrivers().get(0);
+
+        assertThat(driver.getLaps()).hasSize(2);
+        assertThat(driver.getLaps().get(0).getKartNum()).isEqualTo(9);
+        assertThat(driver.getLaps().get(1).getKartNum()).isEqualTo(101);
+    }
+
+    @Test
+    @DisplayName("merge: новый id сессии начинает состояние заново")
+    void merge_newSession_resetsState() {
+        service.handleUpdate(service.parseFromJson(HEAT_777_FULL), 1_000_000L);
+        service.handleUpdate(service.parseFromJson("""
+                {"id":778,"drivers":[
+                  {"driver":{"id":"3","name":"C"},"stint":{"kart":30,"number":1,"length":1},
+                   "laps":[{"stintNum":1,"number":1,"time":32000}]}
+                ]}
+                """), 1_001_000L);
+
+        LiveHeatUpdate heat = service.getSnapshot(1_001_100L).getHeat();
+
+        assertThat(heat.getHeatId()).isEqualTo("778");
+        assertThat(heat.getDrivers()).hasSize(1);
+        assertThat(heat.getDrivers().get(0).getDriverId()).isEqualTo("3");
+        assertThat(heat.getElapsed()).isNull();
     }
 }

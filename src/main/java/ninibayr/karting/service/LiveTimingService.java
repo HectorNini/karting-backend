@@ -12,7 +12,11 @@ import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 /**
  * Принимает сообщения live-тайминга с сайта, хранит последнее состояние,
@@ -55,6 +59,13 @@ public class LiveTimingService {
     /** Ручная остановка: показываем сессию завершённой, пока не придут новые данные. */
     private volatile boolean stoppedManually;
 
+    /**
+     * История картов по стинтам, собранная из live-обновлений:
+     * driverId → (номер стинта → номер карта). Нужна, чтобы проставлять карт
+     * каждому кругу: сайт обычно присылает {@code laps[].kartNum = null}.
+     */
+    private final Map<String, Map<Integer, Integer>> stintKarts = new HashMap<>();
+
     public LiveTimingService(SimpMessagingTemplate messagingTemplate,
                              ObjectMapper objectMapper,
                              HeatPrefetchService heatPrefetchService,
@@ -85,7 +96,8 @@ public class LiveTimingService {
         boolean started = false;
         boolean ended = false;
         boolean wasLive;
-        LiveHeatUpdate finishedHeat = null;
+        String endedHeatId = null;
+        String endedHeatName = null;
 
         synchronized (lock) {
             wasLive = live;
@@ -93,19 +105,36 @@ public class LiveTimingService {
             // Любые новые данные снимают ручную остановку.
             stoppedManually = false;
 
-            if (update.getHeatId() != null && !update.getHeatId().equals(currentHeatId)) {
+            String previousHeatId = currentHeatId;
+            String previousHeatName = current != null ? current.getHeatName() : null;
+
+            boolean newSession = update.getHeatId() != null && !update.getHeatId().equals(currentHeatId);
+            if (newSession) {
                 currentHeatId = update.getHeatId();
                 messagesForCurrentHeat = 0;
                 live = false;
+                stintKarts.clear();
                 log.info("Live-тайминг: новая сессия {} (id {})", update.getHeatName(), update.getHeatId());
             }
 
             messagesForCurrentHeat++;
             totalMessages++;
             lastMessageAt = now;
-            current = update;
-            if (update.getElapsed() != null) {
-                startedAt = now - update.getElapsed();
+
+            // Сайт присылает не полное состояние, а дельту (обычно один гонщик
+            // и один круг). Как и официальный клиент, накапливаем состояние сами.
+            if (newSession || current == null) {
+                current = update;
+                if (current.getPitlaneKarts() == null) {
+                    current.setPitlaneKarts(new ArrayList<>());
+                }
+            } else {
+                current = merge(current, update);
+            }
+
+            recordStintKarts(update.getDrivers());
+            if (current.getElapsed() != null) {
+                startedAt = now - current.getElapsed();
             }
 
             // Одно сообщение — это «последнее состояние» с сервера, а не живая гонка.
@@ -113,7 +142,9 @@ public class LiveTimingService {
             started = live && !wasLive;
             ended = !live && wasLive;
             if (ended) {
-                finishedHeat = update;
+                // Новая сессия началась — сохраняем именно предыдущую.
+                endedHeatId = previousHeatId;
+                endedHeatName = previousHeatName;
             }
         }
 
@@ -124,9 +155,9 @@ public class LiveTimingService {
                     update.getHeatName(), update.getHeatId());
             broadcastStatus();
         } else if (ended) {
-            log.info("Live-тайминг: сессия завершилась — {}", update.getHeatName());
+            log.info("Live-тайминг: сессия завершилась — {}", endedHeatName);
             broadcastStatus();
-            persistHeat(finishedHeat != null ? finishedHeat.getHeatId() : null);
+            persistHeat(endedHeatId);
         }
     }
 
@@ -168,16 +199,158 @@ public class LiveTimingService {
 
     /**
      * После завершения live-сессии подтягиваем заезд в БД, чтобы он появился
-     * в обычном списке и открывался мгновенно.
+     * в обычном списке и открывался мгновенно. Именно принудительно: заезд мог
+     * попасть в БД ещё во время гонки, и обычный прогрев его пропустит.
      */
     private void persistHeat(String heatId) {
         if (heatId == null || heatPrefetchService == null) {
             return;
         }
         try {
-            heatPrefetchService.prefetchOneAsync(heatId);
+            heatPrefetchService.resyncOneAsync(heatId);
         } catch (Exception e) {
             log.debug("Не удалось поставить заезд {} на синхронизацию: {}", heatId, e.getMessage());
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Слияние дельт
+    // ------------------------------------------------------------------
+
+    /**
+     * Накапливает дельту в текущее состояние по правилам официального клиента:
+     * гонщики — по id, круги — по номеру, стинт и питлейн берутся из дельты
+     * только если реально пришли.
+     */
+    private LiveHeatUpdate merge(LiveHeatUpdate current, LiveHeatUpdate update) {
+        if (update.getHeatName() != null) {
+            current.setHeatName(update.getHeatName());
+        }
+        if (update.getTrackSlug() != null) {
+            current.setTrackSlug(update.getTrackSlug());
+        }
+        if (update.getElapsed() != null) {
+            current.setElapsed(update.getElapsed());
+        }
+        if (update.getMode() != null) {
+            current.setMode(update.getMode());
+        }
+        if (update.getPitstopTimeThreshold() != null) {
+            current.setPitstopTimeThreshold(update.getPitstopTimeThreshold());
+        }
+        if (update.getPitlaneKarts() != null) {
+            // Пустой массив — «питлейн опустел»; отсутствие поля — «без изменений».
+            current.setPitlaneKarts(update.getPitlaneKarts());
+        }
+        if (current.getPitlaneKarts() == null) {
+            current.setPitlaneKarts(new ArrayList<>());
+        }
+
+        List<LiveHeatUpdate.LiveDriver> target = current.getDrivers();
+        // Копия списка: в этот момент snapshot мог уже уйти в Jackson и
+        // сериализоваться в другом потоке, менять список «на месте» нельзя.
+        List<LiveHeatUpdate.LiveDriver> merged = target == null
+                ? new ArrayList<>()
+                : new ArrayList<>(target);
+        Map<String, LiveHeatUpdate.LiveDriver> byDriverId = new HashMap<>();
+        for (LiveHeatUpdate.LiveDriver driver : merged) {
+            if (driver.getDriverId() != null) {
+                byDriverId.put(driver.getDriverId(), driver);
+            }
+        }
+
+        if (update.getDrivers() != null) {
+            for (LiveHeatUpdate.LiveDriver incoming : update.getDrivers()) {
+                LiveHeatUpdate.LiveDriver existing = incoming.getDriverId() != null
+                        ? byDriverId.get(incoming.getDriverId())
+                        : null;
+                if (existing == null) {
+                    merged.add(incoming);
+                    if (incoming.getDriverId() != null) {
+                        byDriverId.put(incoming.getDriverId(), incoming);
+                    }
+                } else {
+                    mergeDriver(existing, incoming);
+                }
+            }
+        }
+        current.setDrivers(merged);
+        return current;
+    }
+
+    private static void mergeDriver(LiveHeatUpdate.LiveDriver target, LiveHeatUpdate.LiveDriver incoming) {
+        if (incoming.getDriverName() != null) {
+            target.setDriverName(incoming.getDriverName());
+        }
+        if (incoming.getNumber() != null) {
+            target.setNumber(incoming.getNumber());
+        }
+        if (incoming.getPosition() != null) {
+            target.setPosition(incoming.getPosition());
+        }
+        if (incoming.getBestTime() != null) {
+            target.setBestTime(incoming.getBestTime());
+        }
+        if (incoming.getStint() != null) {
+            target.setStint(incoming.getStint());
+        }
+
+        List<LiveHeatUpdate.LiveLap> laps = target.getLaps();
+        // Копия: старый список мог сериализоваться в момент обновления.
+        List<LiveHeatUpdate.LiveLap> mergedLaps = laps == null
+                ? new ArrayList<>()
+                : new ArrayList<>(laps);
+        Set<Integer> knownNumbers = new HashSet<>();
+        for (LiveHeatUpdate.LiveLap lap : mergedLaps) {
+            if (lap.getNumber() != null) {
+                knownNumbers.add(lap.getNumber());
+            }
+        }
+        if (incoming.getLaps() != null) {
+            for (LiveHeatUpdate.LiveLap lap : incoming.getLaps()) {
+                if (lap.getNumber() == null || knownNumbers.add(lap.getNumber())) {
+                    mergedLaps.add(lap);
+                }
+            }
+        }
+        target.setLaps(mergedLaps);
+        recomputeDerived(target);
+    }
+
+    private void recordStintKarts(List<LiveHeatUpdate.LiveDriver> drivers) {
+        if (drivers == null) {
+            return;
+        }
+        for (LiveHeatUpdate.LiveDriver driver : drivers) {
+            if (driver.getDriverId() == null || driver.getStint() == null) {
+                continue;
+            }
+            Integer number = driver.getStint().getNumber();
+            Integer kart = driver.getStint().getKart();
+            if (number != null && kart != null) {
+                stintKarts.computeIfAbsent(driver.getDriverId(), k -> new HashMap<>()).put(number, kart);
+            }
+        }
+    }
+
+    /** Проставляет карт кругам, если сайт не прислал {@code kartNum}. */
+    private void fillLapKarts(LiveHeatUpdate heat) {
+        if (heat == null || heat.getDrivers() == null) {
+            return;
+        }
+        for (LiveHeatUpdate.LiveDriver driver : heat.getDrivers()) {
+            if (driver.getDriverId() == null || driver.getLaps() == null) {
+                continue;
+            }
+            Map<Integer, Integer> karts = stintKarts.get(driver.getDriverId());
+            if (karts == null || karts.isEmpty()) {
+                continue;
+            }
+            for (LiveHeatUpdate.LiveLap lap : driver.getLaps()) {
+                if (lap.getKartNum() == null && lap.getStintNum() != null) {
+                    lap.setKartNum(karts.get(lap.getStintNum()));
+                }
+            }
         }
     }
 
@@ -192,6 +365,8 @@ public class LiveTimingService {
     LiveSnapshot getSnapshot(long now) {
         LiveSnapshot snapshot = new LiveSnapshot();
         synchronized (lock) {
+            // Дозаполняем карты кругам по истории стинтов (сайт присылает их без kartNum).
+            fillLapKarts(current);
             long age = lastMessageAt == 0 ? -1 : Math.max(0, now - lastMessageAt);
             boolean stillFresh = lastMessageAt > 0 && age <= staleTimeoutMs;
             boolean isLive = live && stillFresh;
@@ -297,9 +472,16 @@ public class LiveTimingService {
         }
     }
 
+    /**
+     * Возвращает {@code null}, если поля нет в сообщении: это значит «не менять
+     * питлейн». Пустой массив — «питлейн опустел».
+     */
     private List<Integer> parsePitlane(JsonNode node) {
+        if (node == null || node.isNull()) {
+            return null;
+        }
         List<Integer> karts = new ArrayList<>();
-        if (node != null && node.isArray()) {
+        if (node.isArray()) {
             for (JsonNode kart : node) {
                 if (kart != null && !kart.isNull()) {
                     karts.add(kart.asInt());
@@ -334,38 +516,50 @@ public class LiveTimingService {
         driver.setLaps(parseLaps(d.get("laps")));
 
         // Производные значения: их сервер не отдаёт (bestTime обычно null).
-        List<LiveHeatUpdate.LiveLap> laps = driver.getLaps();
-        if (!laps.isEmpty()) {
-            List<LiveHeatUpdate.LiveLap> sorted = new ArrayList<>(laps);
-            sorted.sort(Comparator.comparing(l -> l.getNumber() != null ? l.getNumber() : 0));
-
-            Long best = null;
-            LiveHeatUpdate.LiveLap lastTimed = null;
-            for (LiveHeatUpdate.LiveLap lap : sorted) {
-                if (lap.getTime() == null) {
-                    continue;
-                }
-                if (best == null || lap.getTime() < best) {
-                    best = lap.getTime();
-                }
-                lastTimed = lap;
-            }
-            driver.setTotalLaps((int) sorted.stream().filter(l -> l.getTime() != null).count());
-            driver.setLastLapNumber(lastTimed != null ? lastTimed.getNumber() : null);
-            driver.setLastLapTime(lastTimed != null ? lastTimed.getTime() : null);
-            driver.setBestLapTime(best);
-            if (driver.getBestTime() == null) {
-                driver.setBestTime(best);
-            }
-            driver.setLastGapTime(findLastGap(sorted));
-        } else {
-            driver.setTotalLaps(0);
-        }
+        recomputeDerived(driver);
         return driver;
     }
 
+    /**
+     * Пересчитывает производные поля по списку кругов. Вызывается и при разборе
+     * дельты, и после слияния: в дельте обычно один круг, а итог нужен по всем.
+     */
+    private static void recomputeDerived(LiveHeatUpdate.LiveDriver driver) {
+        List<LiveHeatUpdate.LiveLap> laps = driver.getLaps();
+        if (laps == null || laps.isEmpty()) {
+            driver.setTotalLaps(0);
+            driver.setBestLapTime(null);
+            driver.setLastLapNumber(null);
+            driver.setLastLapTime(null);
+            driver.setLastGapTime(null);
+            return;
+        }
+        List<LiveHeatUpdate.LiveLap> sorted = new ArrayList<>(laps);
+        sorted.sort(Comparator.comparing(l -> l.getNumber() != null ? l.getNumber() : 0));
+
+        Long best = null;
+        LiveHeatUpdate.LiveLap lastTimed = null;
+        for (LiveHeatUpdate.LiveLap lap : sorted) {
+            if (lap.getTime() == null) {
+                continue;
+            }
+            if (best == null || lap.getTime() < best) {
+                best = lap.getTime();
+            }
+            lastTimed = lap;
+        }
+        driver.setTotalLaps((int) sorted.stream().filter(l -> l.getTime() != null).count());
+        driver.setLastLapNumber(lastTimed != null ? lastTimed.getNumber() : null);
+        driver.setLastLapTime(lastTimed != null ? lastTimed.getTime() : null);
+        driver.setBestLapTime(best);
+        if (driver.getBestTime() == null) {
+            driver.setBestTime(best);
+        }
+        driver.setLastGapTime(findLastGap(sorted));
+    }
+
     /** Последний непустой gapTime (интервал до машины впереди). */
-    private Long findLastGap(List<LiveHeatUpdate.LiveLap> sortedLaps) {
+    private static Long findLastGap(List<LiveHeatUpdate.LiveLap> sortedLaps) {
         for (int i = sortedLaps.size() - 1; i >= 0; i--) {
             Long gap = sortedLaps.get(i).getGapTime();
             if (gap != null) {

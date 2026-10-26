@@ -42,6 +42,9 @@ public class HeatPrefetchService {
     /** Уже поставленные в очередь / обработанные id, чтобы не дублировать работу. */
     private final Set<String> scheduled = ConcurrentHashMap.newKeySet();
 
+    /** Заезды, которые сейчас принудительно перечитываются (без проверки кэша). */
+    private final Set<String> resyncing = ConcurrentHashMap.newKeySet();
+
     public HeatPrefetchService(HeatRepository heatRepository,
                                HeatSyncService heatSyncService,
                                HeatListParser heatListParser) {
@@ -119,6 +122,26 @@ public class HeatPrefetchService {
                 heatSyncService.syncHeat(heatSiteId);
             } catch (Exception e) {
                 log.warn("Прогрев заезда {} не удался: {}", heatSiteId, e.getMessage());
+            }
+        });
+    }
+
+    /**
+     * Принудительно перечитывает заезд с сайта и обновляет его в БД — даже если
+     * он уже в кэше. Нужно после завершения live-гонки и для дозаполнения
+     * стинтов в старых заездах.
+     */
+    public void resyncOneAsync(String heatSiteId) {
+        if (heatSiteId == null || !resyncing.add(heatSiteId)) {
+            return;
+        }
+        executor.submit(() -> {
+            try {
+                heatSyncService.syncHeat(heatSiteId);
+            } catch (Exception e) {
+                log.warn("Пересинхронизация заезда {} не удалась: {}", heatSiteId, e.getMessage());
+            } finally {
+                resyncing.remove(heatSiteId);
             }
         });
     }
