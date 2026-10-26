@@ -3,15 +3,17 @@ package ninibayr.karting.service;
 import ninibayr.karting.dto.HeatData;
 import ninibayr.karting.entity.DriverEntity;
 import ninibayr.karting.entity.HeatEntity;
+import ninibayr.karting.entity.HeatStintEntity;
 import ninibayr.karting.entity.LapEntity;
 import ninibayr.karting.entity.TrackEntity;
 import ninibayr.karting.repository.DriverRepository;
+import jakarta.persistence.EntityManager;
+import jakarta.persistence.PersistenceContext;
 import org.springframework.stereotype.Component;
 
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Comparator;
-import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -22,6 +24,9 @@ import java.util.stream.Collectors;
 public class HeatMapper {
 
     private final DriverRepository driverRepository;
+
+    @PersistenceContext
+    private EntityManager entityManager;
 
     public HeatMapper(DriverRepository driverRepository) {
         this.driverRepository = driverRepository;
@@ -36,6 +41,11 @@ public class HeatMapper {
         Map<String, DriverEntity> driversBySiteId = resolveDrivers(parsed, track);
 
         heatEntity.getLaps().clear();
+        heatEntity.getStints().clear();
+        // Явно сбрасываем удаление старых кругов/стинтов до вставки новых:
+        // иначе Hibernate вставляет новые стинты раньше orphan-removal и ловит
+        // unique constraint (heat_id, driver_id, stint_number).
+        entityManager.flush();
 
         for (ParsedHeatData.ParsedLap parsedLap : parsed.getLaps()) {
             DriverEntity driver = driversBySiteId.get(parsedLap.getDriverSiteId());
@@ -47,10 +57,7 @@ public class HeatMapper {
             lap.setHeat(heatEntity);
             lap.setDriver(driver);
             lap.setColumnIndex(parsedLap.getColumnIndex());
-            parsed.getDrivers().stream()
-                    .filter(d -> d.getSiteId().equals(parsedLap.getDriverSiteId()))
-                    .findFirst()
-                    .ifPresent(d -> lap.setKartNumber(d.getKartNumber()));
+            lap.setKartNumber(parsedLap.getKartNumber());
             lap.setLapNumber(parsedLap.getLapNumber());
             lap.setRaceLapNumber(parsedLap.getRaceLapNumber());
             lap.setStintIndex(parsedLap.getStintIndex());
@@ -63,6 +70,27 @@ public class HeatMapper {
             lap.setBestLapOverall(parsedLap.isBestLapOverall());
             lap.setBestLapStint(parsedLap.isBestLapStint());
             heatEntity.getLaps().add(lap);
+        }
+
+        for (ParsedHeatData.ParsedDriver parsedDriver : parsed.getDrivers()) {
+            DriverEntity driver = driversBySiteId.get(parsedDriver.getSiteId());
+            if (driver == null) {
+                continue;
+            }
+            for (ParsedHeatData.ParsedStint parsedStint : parsedDriver.getStints()) {
+                HeatStintEntity stint = new HeatStintEntity();
+                stint.setHeat(heatEntity);
+                stint.setDriver(driver);
+                stint.setStintNumber(parsedStint.getNumber());
+                stint.setKartNumber(parsedStint.getKartNumber());
+                stint.setLapFrom(parsedStint.getLapFrom());
+                stint.setLapTo(parsedStint.getLapTo());
+                stint.setLapsCount(parsedStint.getLapsCount());
+                stint.setBestLapMillis(parsedStint.getBestLapMillis());
+                stint.setAvgLapMillis(parsedStint.getAvgLapMillis());
+                stint.setDevMillis(parsedStint.getDevMillis());
+                heatEntity.getStints().add(stint);
+            }
         }
     }
 
@@ -90,14 +118,20 @@ public class HeatMapper {
                         .add(l));
 
         List<HeatData.DriverInfo> drivers = new ArrayList<>();
-        Map<Integer, Long> totalByColumn = new HashMap<>();
         for (Map.Entry<Integer, List<LapEntity>> entry : lapsByColumn.entrySet()) {
             List<LapEntity> driverLaps = entry.getValue();
             driverLaps.sort(Comparator.comparing(
                     l -> l.getRaceLapNumber() != null ? l.getRaceLapNumber() : Integer.MAX_VALUE));
 
             LapEntity firstLap = driverLaps.get(0);
-            HeatData.DriverInfo info = toDriverInfo(firstLap, parsedDriversBySiteId, entry.getKey());
+            String finalPosition = driverLaps.stream()
+                    .map(LapEntity::getRacePosition)
+                    .filter(Objects::nonNull)
+                    .reduce((previous, current) -> current)
+                    .orElse(null);
+            List<HeatData.StintInfo> stints = stintsForDriver(heat, firstLap.getDriver());
+            HeatData.DriverInfo info = toDriverInfo(
+                    firstLap, parsedDriversBySiteId, entry.getKey(), finalPosition, stints);
 
             info.setTotalLaps((int) driverLaps.stream()
                     .filter(l -> l.getLapTimeMillis() != null)
@@ -108,29 +142,17 @@ public class HeatMapper {
                     .min(Long::compareTo)
                     .orElse(null);
             info.setBestLapMillis(best);
-            // Суммарное время для расчёта итоговой позиции.
-            long totalMillis = driverLaps.stream()
-                    .map(LapEntity::getLapTimeMillis)
-                    .filter(Objects::nonNull)
-                    .mapToLong(Long::longValue)
-                    .sum();
 
             drivers.add(info);
-            totalByColumn.put(entry.getKey(), totalMillis);
         }
 
-        // Итоговая позиция: больше кругов — выше; при равенстве кругов — меньше суммарное время.
-        List<HeatData.DriverInfo> ranked = new ArrayList<>(drivers);
-        ranked.sort(Comparator
-                .comparingInt((HeatData.DriverInfo d) -> d.getTotalLaps() == null ? 0 : d.getTotalLaps())
-                .reversed()
-                .thenComparingLong(d -> totalByColumn.getOrDefault(d.getColumnIndex(), Long.MAX_VALUE)));
-        for (int i = 0; i < ranked.size(); i++) {
-            ranked.get(i).setPosition("P" + (i + 1));
-        }
-
-        // Сортируем гонщиков по итоговой позиции в гонке.
-        drivers.sort(Comparator.comparingInt(d -> parsePosition(d.getPosition())));
+        // Порядок — по последней известной позиции в гонке (её отдаёт сайт).
+        // Если позиции нет, выше тот, кто проехал больше кругов.
+        Comparator<HeatData.DriverInfo> byPosition = Comparator.comparingInt(
+                d -> parsePosition(d.getPosition()));
+        Comparator<HeatData.DriverInfo> byLapsDesc = Comparator.comparingInt(
+                (HeatData.DriverInfo d) -> d.getTotalLaps() == null ? 0 : d.getTotalLaps()).reversed();
+        drivers.sort(byPosition.thenComparing(byLapsDesc));
 
         // Строки по номерам кругов в гонке.
         List<Integer> raceLapNumbers = heat.getLaps().stream()
@@ -189,7 +211,11 @@ public class HeatMapper {
         return driversBySiteId;
     }
 
-    private HeatData.DriverInfo toDriverInfo(LapEntity lap, Map<String, ParsedHeatData.ParsedDriver> parsedDriversBySiteId, Integer columnIndex) {
+    private HeatData.DriverInfo toDriverInfo(LapEntity lap,
+                                             Map<String, ParsedHeatData.ParsedDriver> parsedDriversBySiteId,
+                                             Integer columnIndex,
+                                             String position,
+                                             List<HeatData.StintInfo> stints) {
         DriverEntity driver = lap.getDriver();
         String siteId = driver != null ? driver.getSiteId() : null;
         ParsedHeatData.ParsedDriver pd = siteId != null && parsedDriversBySiteId != null ? parsedDriversBySiteId.get(siteId) : null;
@@ -201,11 +227,43 @@ public class HeatMapper {
                 pd != null ? pd.getBestTime() : null,
                 pd != null ? pd.getAvgTime() : null,
                 pd != null ? pd.getDevTime() : null,
+                position,
                 null,
                 null,
-                null,
-                columnIndex
+                columnIndex,
+                stints
         );
+    }
+
+    /** Стинты одного гонщика в этом заезде, по порядку. */
+    private List<HeatData.StintInfo> stintsForDriver(HeatEntity heat, DriverEntity driver) {
+        if (heat.getStints() == null || driver == null) {
+            return List.of();
+        }
+        return heat.getStints().stream()
+                .filter(stint -> sameDriver(stint.getDriver(), driver))
+                .sorted(Comparator.comparing(HeatStintEntity::getStintNumber,
+                        Comparator.nullsLast(Integer::compareTo)))
+                .map(stint -> new HeatData.StintInfo(
+                        stint.getStintNumber(),
+                        stint.getKartNumber(),
+                        stint.getLapFrom(),
+                        stint.getLapTo(),
+                        stint.getLapsCount(),
+                        stint.getBestLapMillis(),
+                        stint.getAvgLapMillis(),
+                        stint.getDevMillis()))
+                .collect(Collectors.toList());
+    }
+
+    private static boolean sameDriver(DriverEntity first, DriverEntity second) {
+        if (first == null || second == null) {
+            return false;
+        }
+        if (first.getId() != null && second.getId() != null) {
+            return first.getId().equals(second.getId());
+        }
+        return Objects.equals(first.getSiteId(), second.getSiteId());
     }
 
     private String formatResult(LapEntity lap) {

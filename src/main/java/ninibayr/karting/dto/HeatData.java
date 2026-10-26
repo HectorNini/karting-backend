@@ -37,6 +37,23 @@ public class HeatData {
         private Integer totalLaps;
         /** Индекс колонки гонщика в исходной таблице. */
         private Integer columnIndex;
+        /** Стинты гонщика по порядку (у одиночного стинта — одна запись). */
+        private List<StintInfo> stints;
+    }
+
+    @Data
+    @NoArgsConstructor
+    @AllArgsConstructor
+    public static class StintInfo {
+        /** Номер стинта, начиная с 1. */
+        private Integer number;
+        private Integer kartNumber;
+        private Integer lapFrom;
+        private Integer lapTo;
+        private Integer lapsCount;
+        private Long bestLapMillis;
+        private Long avgLapMillis;
+        private Long devMillis;
     }
 
     @Data
@@ -54,7 +71,7 @@ public class HeatData {
     public static class LapDetail {
         private String lapTime;
         private Long lapTimeMillis;
-        /** Позиция внутри стинта. */
+        /** Позиция в гонке на этом круге (span.p). */
         private String position;
         /** Позиция в гонке на этом круге. */
         private String racePosition;

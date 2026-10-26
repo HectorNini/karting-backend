@@ -9,6 +9,14 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 @Component
 @Slf4j
@@ -95,7 +103,6 @@ public class HeatParser {
             Elements kartElements = kartRow != null ? kartRow.select("th[scope=col]") : null;
             Elements posElements = positionRow != null ? positionRow.select("th[scope=col]") : null;
 
-            int columnIndex = 0;
             for (int i = 0; i < driverElements.size(); i++) {
                 Element driverCol = driverElements.get(i);
                 Element driverEl = driverCol.selectFirst("a[href*=/drivers/]");
@@ -124,7 +131,9 @@ public class HeatParser {
                 ParsedHeatData.ParsedDriver driver = new ParsedHeatData.ParsedDriver();
                 driver.setSiteId(siteId);
                 driver.setName(driverEl.text().trim());
-                driver.setColumnIndex(columnIndex);
+                // Физический индекс столбца в таблице (0-based): по нему же
+                // индексируются ячейки tbody и tfoot.
+                driver.setColumnIndex(i);
                 driver.setKartNumber(parseKartNumber(kartEl));
                 if (posElements != null && i < posElements.size()) {
                     String sp = posElements.get(i).text().trim();
@@ -136,65 +145,57 @@ public class HeatParser {
                     }
                 }
                 data.getDrivers().add(driver);
-                columnIndex++;
             }
         }
 
         Elements lapRows = doc.select("table.heat-result tbody tr");
-        int rowNumber = 0;
-        // На каждого гонщика (колонку) свой счётчик кругов в гонке и текущий стинт.
-        int[] raceLapCounter = new int[data.getDrivers().size()];
-        int[] stintCounter = new int[data.getDrivers().size()];
+        Map<Integer, ParsedHeatData.ParsedDriver> driversByColumn = driversByColumn(data);
 
         for (Element row : lapRows) {
             Element lapHeader = row.selectFirst("th");
             if (lapHeader == null) {
                 continue;
             }
-            // Номер строки (он же номер круга внутри стинта на сайте).
-            int rowLap;
+            // Первая колонка — номер круга гонки (нумерация сквозная по всей гонке).
+            int raceLap;
             try {
                 String lh = lapHeader.text().trim();
                 if (!lh.matches("\\d+")) {
                     continue;
                 }
-                rowLap = Integer.parseInt(lh);
+                raceLap = Integer.parseInt(lh);
             } catch (NumberFormatException e) {
                 continue;
             }
-            rowNumber++;
 
             Elements tdElements = row.select("td");
-            for (int i = 0; i < tdElements.size() && i < data.getDrivers().size(); i++) {
+            for (int i = 0; i < tdElements.size(); i++) {
                 Element td = tdElements.get(i);
-                ParsedHeatData.ParsedDriver driver = data.getDrivers().get(i);
-
-                Element posEl = td.selectFirst("span.p");
-                String stintPosition = posEl != null ? posEl.text().trim() : "";
-                boolean hasTime = parseLapTimeMillis(td) != null;
-
-                // Пустая ячейка = этот гонщик уже финишировал / ещё не стартовал.
-                if (!hasTime && stintPosition.isEmpty()) {
+                // Столбец i — физический; гонщик может отсутствовать (пустая/битая
+                // ячейка шапки), тогда пропускаем именно этот столбец.
+                ParsedHeatData.ParsedDriver driver = driversByColumn.get(i);
+                if (driver == null) {
                     continue;
                 }
 
-                // Детект нового стинта: позиция снова P1 после того как гонщик уже
-                // проехал хотя бы один круг (сайт перезапускает нумерацию позиций
-                // в стинте при смене карта).
-                if (stintPosition.equalsIgnoreCase("P1") && rowLap > 1) {
-                    stintCounter[i]++;
+                Element posEl = td.selectFirst("span.p");
+                String position = posEl != null ? posEl.text().trim() : "";
+                Long lapTimeMillis = parseLapTimeMillis(td);
+
+                // Пустая ячейка = этот гонщик уже финишировал / ещё не стартовал.
+                if (lapTimeMillis == null && position.isEmpty()) {
+                    continue;
                 }
-                raceLapCounter[i]++;
 
                 ParsedHeatData.ParsedLap lap = new ParsedHeatData.ParsedLap();
-                lap.setLapNumber(rowLap);
-                lap.setRaceLapNumber(raceLapCounter[i]);
-                lap.setStintIndex(stintCounter[i]);
+                lap.setLapNumber(raceLap);
+                lap.setRaceLapNumber(raceLap);
                 lap.setDriverSiteId(driver.getSiteId());
                 lap.setColumnIndex(driver.getColumnIndex());
                 lap.setLapTime(parseLapTime(td));
-                lap.setLapTimeMillis(parseLapTimeMillis(td));
-                lap.setPosition(stintPosition.isEmpty() ? null : stintPosition);
+                lap.setLapTimeMillis(lapTimeMillis);
+                lap.setPosition(position.isEmpty() ? null : position);
+                lap.setRacePosition(position.isEmpty() ? null : position);
 
                 Element gapLeader = td.selectFirst("span.g");
                 if (gapLeader != null) {
@@ -220,47 +221,201 @@ public class HeatParser {
         }
 
         parseFooterStats(doc, data);
-
-        // Позиция в гонке на каждом круге: считаем по накопленному времени.
-        computeRacePositions(data);
+        parseStints(doc, data);
+        applyStintsToLaps(data);
 
         return data;
     }
 
+    // ------------------------------------------------------------------
+    // Стинты и карты
+    // ------------------------------------------------------------------
+
+    /** Строка footer'а вида «S1 kart», «S2 laps», «S3 best»… */
+    private static final Pattern STINT_ROW = Pattern.compile("(?i)^S(\\d+)\\s+(kart|laps|best|avg|dev)$");
+
     /**
-     * Считает настоящую позицию в гонке для каждого круга каждой колонки.
-     * Позиция определяется по суммарному времени гонщика на этом круге гонки
-     * (т.е. по количеству пройденных кругов и накопленному времени).
+     * Разбирает блок S1..Sn в tfoot. Для каждого гонщика строит отрезки стинтов
+     * и проставляет стартовый карт (S1 kart). Если S-строк нет (карт не меняли),
+     * создаёт один стинт на весь заезд.
      */
-    private static void computeRacePositions(ParsedHeatData data) {
-        // группируем круги по номеру круга в гонке
-        java.util.Map<Integer, java.util.List<ParsedHeatData.ParsedLap>> byRaceLap = new java.util.TreeMap<>();
-        for (ParsedHeatData.ParsedLap lap : data.getLaps()) {
-            if (lap.getRaceLapNumber() == null) {
-                continue;
-            }
-            byRaceLap.computeIfAbsent(lap.getRaceLapNumber(), k -> new java.util.ArrayList<>()).add(lap);
+    private static void parseStints(Document doc, ParsedHeatData data) {
+        if (data.getDrivers().isEmpty()) {
+            return;
         }
 
-        // накопленное время по колонкам
-        java.util.Map<Integer, Long> cumulative = new java.util.HashMap<>();
-        for (java.util.Map.Entry<Integer, java.util.List<ParsedHeatData.ParsedLap>> e : byRaceLap.entrySet()) {
-            java.util.List<ParsedHeatData.ParsedLap> lapsOnLap = e.getValue();
-            final java.util.Map<Integer, Long> cumulativeSnapshot = new java.util.HashMap<>(cumulative);
-            lapsOnLap.sort(java.util.Comparator.comparingLong(l -> {
-                Long acc = cumulativeSnapshot.getOrDefault(l.getColumnIndex(), 0L);
-                Long t = l.getLapTimeMillis();
-                return acc + (t != null ? t : Long.MAX_VALUE / 4);
-            }));
-            int pos = 1;
-            for (ParsedHeatData.ParsedLap lap : lapsOnLap) {
-                lap.setRacePosition("P" + pos);
-                Long t = lap.getLapTimeMillis();
-                if (t != null) {
-                    cumulative.merge(lap.getColumnIndex(), t, Long::sum);
-                }
-                pos++;
+        Map<Integer, Map<Integer, Integer>> karts = new HashMap<>();
+        Map<Integer, Map<Integer, Integer>> lapCounts = new HashMap<>();
+        Map<Integer, Map<Integer, Long>> bests = new HashMap<>();
+        Map<Integer, Map<Integer, Long>> avgs = new HashMap<>();
+        Map<Integer, Map<Integer, Long>> devs = new HashMap<>();
+
+        for (Element tr : doc.select("table.heat-result tfoot tr")) {
+            Element th = tr.selectFirst("th");
+            if (th == null) {
+                continue;
             }
+            Matcher m = STINT_ROW.matcher(th.text().trim());
+            if (!m.matches()) {
+                continue;
+            }
+            int number;
+            try {
+                number = Integer.parseInt(m.group(1));
+            } catch (NumberFormatException e) {
+                continue;
+            }
+            String kind = m.group(2).toLowerCase(Locale.ROOT);
+            Elements tds = tr.select("td");
+            for (int i = 0; i < tds.size(); i++) {
+                String text = tds.get(i).text().trim();
+                if (text.isEmpty()) {
+                    // Пустая ячейка = у гонщика нет такого стинта.
+                    continue;
+                }
+                switch (kind) {
+                    case "kart" -> putValue(karts, i, number, parseInteger(text));
+                    case "laps" -> putValue(lapCounts, i, number, parseInteger(text));
+                    case "best" -> putValue(bests, i, number, parseSecondsToMillis(text));
+                    case "avg" -> putValue(avgs, i, number, parseSecondsToMillis(text));
+                    case "dev" -> putValue(devs, i, number, parseSecondsToMillis(text));
+                    default -> {
+                    }
+                }
+            }
+        }
+
+        for (ParsedHeatData.ParsedDriver driver : data.getDrivers()) {
+            int column = driver.getColumnIndex();
+            List<ParsedHeatData.ParsedLap> driverLaps = new ArrayList<>();
+            for (ParsedHeatData.ParsedLap lap : data.getLaps()) {
+                if (driver.getSiteId() != null && driver.getSiteId().equals(lap.getDriverSiteId())) {
+                    driverLaps.add(lap);
+                }
+            }
+            if (driverLaps.isEmpty()) {
+                continue;
+            }
+
+            Map<Integer, Integer> counts = lapCounts.getOrDefault(column, Map.of());
+            List<Integer> numbers = new ArrayList<>(counts.keySet());
+            Collections.sort(numbers);
+
+            List<ParsedHeatData.ParsedStint> stints = new ArrayList<>();
+            int from = 1;
+            for (Integer number : numbers) {
+                Integer count = counts.get(number);
+                if (count == null || count <= 0) {
+                    continue;
+                }
+                ParsedHeatData.ParsedStint stint = new ParsedHeatData.ParsedStint();
+                stint.setNumber(number);
+                stint.setLapsCount(count);
+                stint.setLapFrom(from);
+                stint.setLapTo(from + count - 1);
+                stint.setKartNumber(karts.getOrDefault(column, Map.of()).get(number));
+                stint.setBestLapMillis(bests.getOrDefault(column, Map.of()).get(number));
+                stint.setAvgLapMillis(avgs.getOrDefault(column, Map.of()).get(number));
+                stint.setDevMillis(devs.getOrDefault(column, Map.of()).get(number));
+                from = stint.getLapTo() + 1;
+                stints.add(stint);
+            }
+
+            if (stints.isEmpty()) {
+                // Карт не меняли: на сайте нет S-строк, считаем весь заезд одним стинтом.
+                int firstLap = driverLaps.stream()
+                        .map(ParsedHeatData.ParsedLap::getRaceLapNumber)
+                        .filter(java.util.Objects::nonNull)
+                        .min(Integer::compareTo)
+                        .orElse(1);
+                int lastLap = driverLaps.stream()
+                        .map(ParsedHeatData.ParsedLap::getRaceLapNumber)
+                        .filter(java.util.Objects::nonNull)
+                        .max(Integer::compareTo)
+                        .orElse(firstLap);
+                ParsedHeatData.ParsedStint stint = new ParsedHeatData.ParsedStint();
+                stint.setNumber(1);
+                stint.setLapFrom(firstLap);
+                stint.setLapTo(lastLap);
+                stint.setLapsCount(driverLaps.size());
+                stint.setKartNumber(driver.getKartNumber());
+                stints.add(stint);
+            }
+
+            driver.setStints(stints);
+            Integer startKart = stints.get(0).getKartNumber();
+            if (startKart != null) {
+                driver.setKartNumber(startKart);
+            }
+        }
+    }
+
+    private static <T> void putValue(Map<Integer, Map<Integer, T>> target,
+                                     int column, int stint, T value) {
+        if (value == null) {
+            return;
+        }
+        target.computeIfAbsent(column, k -> new HashMap<>()).put(stint, value);
+    }
+
+    /** Проставляет каждому кругу номер стинта и карт. */
+    private static void applyStintsToLaps(ParsedHeatData data) {
+        Map<String, ParsedHeatData.ParsedDriver> bySiteId = new HashMap<>();
+        for (ParsedHeatData.ParsedDriver driver : data.getDrivers()) {
+            if (driver.getSiteId() != null) {
+                bySiteId.put(driver.getSiteId(), driver);
+            }
+        }
+        for (ParsedHeatData.ParsedLap lap : data.getLaps()) {
+            ParsedHeatData.ParsedDriver driver = bySiteId.get(lap.getDriverSiteId());
+            if (driver == null) {
+                continue;
+            }
+            ParsedHeatData.ParsedStint stint = findStint(driver.getStints(), lap.getRaceLapNumber());
+            if (stint != null) {
+                lap.setStintIndex(stint.getNumber());
+                lap.setKartNumber(stint.getKartNumber());
+            } else {
+                lap.setStintIndex(1);
+                lap.setKartNumber(driver.getKartNumber());
+            }
+        }
+    }
+
+    private static ParsedHeatData.ParsedStint findStint(List<ParsedHeatData.ParsedStint> stints,
+                                                        Integer raceLap) {
+        if (stints == null || stints.isEmpty() || raceLap == null) {
+            return null;
+        }
+        for (ParsedHeatData.ParsedStint stint : stints) {
+            if (stint.getLapFrom() == null || stint.getLapTo() == null) {
+                continue;
+            }
+            if (raceLap >= stint.getLapFrom() && raceLap <= stint.getLapTo()) {
+                return stint;
+            }
+        }
+        // Круг за пределами посчитанных диапазонов (например, страница обновилась
+        // посреди круга) — считаем, что действует последний стинт.
+        ParsedHeatData.ParsedStint last = stints.get(stints.size() - 1);
+        if (last.getLapTo() != null && raceLap > last.getLapTo()) {
+            return last;
+        }
+        return null;
+    }
+
+    private static Integer parseInteger(String text) {
+        if (text == null) {
+            return null;
+        }
+        String cleaned = text.trim();
+        if (cleaned.isEmpty()) {
+            return null;
+        }
+        try {
+            return Integer.parseInt(cleaned);
+        } catch (NumberFormatException e) {
+            return null;
         }
     }
 
@@ -305,34 +460,50 @@ public class HeatParser {
         }
     }
 
+    private static final Pattern PIT_LAP_SUFFIX = Pattern.compile("\\s+\\d+l\\s*$");
+
     private static String parseLapTime(Element td) {
         Element clone = td.clone();
         clone.select("span").remove();
         String time = clone.text().replaceAll("\\s+", " ").trim();
+        // На круге заезда в пит сайт дописывает «Nl» — число кругов стинта.
+        time = PIT_LAP_SUFFIX.matcher(time).replaceFirst("").trim();
         return time.isEmpty() ? null : time;
     }
 
     private static Long parseLapTimeMillis(Element td) {
-        String time = parseLapTime(td);
-        if (time == null || time.isBlank()) {
+        return parseSecondsToMillis(parseLapTime(td));
+    }
+
+    /** «29.278» или «1:35.048» → миллисекунды. */
+    private static Long parseSecondsToMillis(String text) {
+        if (text == null) {
+            return null;
+        }
+        String time = text.trim().replace(',', '.');
+        if (time.isEmpty()) {
             return null;
         }
         try {
             if (time.contains(":")) {
                 String[] parts = time.split(":");
-                String minutes = parts[0];
-                String seconds = parts.length > 1 ? parts[1] : "0";
-                double sec = Double.parseDouble(seconds);
-                long minMs = Long.parseLong(minutes) * 60_000L;
-                long secMs = Math.round(sec * 1000.0);
-                return minMs + secMs;
-            } else {
-                double sec = Double.parseDouble(time);
-                return Math.round(sec * 1000.0);
+                long minutes = Long.parseLong(parts[0].trim());
+                double seconds = Double.parseDouble(parts[1].trim());
+                return minutes * 60_000L + Math.round(seconds * 1000.0);
             }
+            return Math.round(Double.parseDouble(time) * 1000.0);
         } catch (Exception e) {
             return null;
         }
+    }
+
+    /** Гонщики по физическому индексу столбца таблицы. */
+    private static Map<Integer, ParsedHeatData.ParsedDriver> driversByColumn(ParsedHeatData data) {
+        Map<Integer, ParsedHeatData.ParsedDriver> byColumn = new HashMap<>();
+        for (ParsedHeatData.ParsedDriver driver : data.getDrivers()) {
+            byColumn.put(driver.getColumnIndex(), driver);
+        }
+        return byColumn;
     }
 
     private static void parseWeather(Document doc, ParsedHeatData data) {
@@ -366,9 +537,13 @@ public class HeatParser {
             if (tds.isEmpty()) {
                 continue;
             }
-            // apply to drivers in order of columns
-            for (int i = 0; i < tds.size() && i < data.getDrivers().size(); i++) {
-                ParsedHeatData.ParsedDriver driver = data.getDrivers().get(i);
+            // apply to drivers by physical column index
+            Map<Integer, ParsedHeatData.ParsedDriver> byColumn = driversByColumn(data);
+            for (int i = 0; i < tds.size(); i++) {
+                ParsedHeatData.ParsedDriver driver = byColumn.get(i);
+                if (driver == null) {
+                    continue;
+                }
                 String val = tds.get(i).text().trim();
                 if (val.isEmpty()) {
                     continue;

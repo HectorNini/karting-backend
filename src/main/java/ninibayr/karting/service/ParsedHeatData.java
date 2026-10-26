@@ -21,28 +21,51 @@ class ParsedHeatData {
     static class ParsedDriver {
         private String siteId;
         private String name;
+        /** Стартовый карт (строка «Kart» в шапке). */
         private Integer kartNumber;
         private Integer startPosition;
         private int columnIndex;
         private String bestTime;
         private String avgTime;
         private String devTime;
+        /** Стинты по порядку; у одиночного стинта — одна запись. */
+        private List<ParsedStint> stints = new ArrayList<>();
+    }
+
+    /**
+     * Отрезок гонки на одном карте. Диапазоны кругов — в номерах кругов гонки,
+     * {@code lapTo} включительно. Последний круг стинта — это заезд на пит
+     * (на сайте помечен классом {@code pitstop-cell}).
+     */
+    @Data
+    static class ParsedStint {
+        /** Номер стинта, начиная с 1. */
+        private Integer number;
+        private Integer kartNumber;
+        private Integer lapFrom;
+        private Integer lapTo;
+        private Integer lapsCount;
+        private Long bestLapMillis;
+        private Long avgLapMillis;
+        private Long devMillis;
     }
 
     @Data
     static class ParsedLap {
-        /** Номер круга внутри стинта (как в span данных сайта: 1..N). */
+        /** Номер круга в гонке (первая колонка таблицы). */
         private Integer lapNumber;
-        /** Номер круга в гонке (с учётом предыдущих стинтов). */
+        /** То же, что и {@code lapNumber}: в таблице сайта нумерация сквозная. */
         private Integer raceLapNumber;
-        /** Идентификатор стинта (номер карта + порядковый номер смены). */
+        /** Номер стинта, начиная с 1. */
         private Integer stintIndex;
+        /** Карт, на котором проехан этот круг. */
+        private Integer kartNumber;
         private String driverSiteId;
         private String lapTime;
         private Long lapTimeMillis;
-        /** Позиция внутри стинта (span.p). */
+        /** Позиция в гонке на этом круге (span.p). */
         private String position;
-        /** Позиция в гонке на соответствующем круге. */
+        /** Позиция в гонке на этом круге (то же значение, оставлено для API). */
         private String racePosition;
         private int columnIndex;
         private String gapToLeader;

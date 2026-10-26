@@ -33,4 +33,8 @@ public class HeatEntity {
     // Каскадное сохранение: при сохранении Heat, сохранятся и все его Lap
     @OneToMany(mappedBy = "heat", cascade = CascadeType.ALL, orphanRemoval = true)
     private List<LapEntity> laps = new ArrayList<>();
+
+    // Стинты (отрезки на одном карте) — по одному на гонщика и смену карта.
+    @OneToMany(mappedBy = "heat", cascade = CascadeType.ALL, orphanRemoval = true)
+    private List<HeatStintEntity> stints = new ArrayList<>();
 }

@@ -3,15 +3,18 @@ package ninibayr.karting.service;
 import ninibayr.karting.dto.HeatData;
 import ninibayr.karting.entity.DriverEntity;
 import ninibayr.karting.entity.HeatEntity;
+import ninibayr.karting.entity.HeatStintEntity;
 import ninibayr.karting.entity.LapEntity;
 import ninibayr.karting.entity.TrackEntity;
 import ninibayr.karting.repository.DriverRepository;
+import jakarta.persistence.EntityManager;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import java.time.LocalDate;
 import java.time.LocalTime;
@@ -30,12 +33,16 @@ class HeatMapperTest {
     @Mock
     private DriverRepository driverRepository;
 
+    @Mock
+    private EntityManager entityManager;
+
     private HeatMapper heatMapper;
     private TrackEntity testTrack;
 
     @BeforeEach
     void setUp() {
         heatMapper = new HeatMapper(driverRepository);
+        ReflectionTestUtils.setField(heatMapper, "entityManager", entityManager);
         testTrack = new TrackEntity();
         testTrack.setId(1L);
         testTrack.setSlug("narvskaya");
@@ -82,6 +89,17 @@ class HeatMapperTest {
         assertThat(savedLap.getKartNumber()).isEqualTo(33);
         assertThat(savedLap.getColumnIndex()).isEqualTo(0);
         assertThat(savedLap.getDriver()).isEqualTo(existingDriver);
+        assertThat(savedLap.getRacePosition()).isEqualTo("P1");
+        assertThat(savedLap.getStintIndex()).isEqualTo(1);
+        assertThat(savedLap.getKartNumber()).isEqualTo(33);
+
+        assertThat(heatEntity.getStints()).hasSize(1);
+        HeatStintEntity savedStint = heatEntity.getStints().get(0);
+        assertThat(savedStint.getDriver()).isEqualTo(existingDriver);
+        assertThat(savedStint.getStintNumber()).isEqualTo(1);
+        assertThat(savedStint.getKartNumber()).isEqualTo(33);
+        assertThat(savedStint.getLapFrom()).isEqualTo(1);
+        assertThat(savedStint.getLapTo()).isEqualTo(1);
     }
 
     @Test
@@ -158,6 +176,16 @@ class HeatMapperTest {
 
         heatEntity.setLaps(List.of(lap2, lap1));
 
+        HeatStintEntity stint = new HeatStintEntity();
+        stint.setDriver(driver1);
+        stint.setStintNumber(1);
+        stint.setKartNumber(33);
+        stint.setLapFrom(1);
+        stint.setLapTo(1);
+        stint.setLapsCount(1);
+        stint.setBestLapMillis(142_523L);
+        heatEntity.setStints(List.of(stint));
+
         HeatData result = heatMapper.toDto(heatEntity);
 
         assertThat(result.getHeatName()).isEqualTo("Heat 33 ДЕТИ");
@@ -167,9 +195,18 @@ class HeatMapperTest {
                 .containsExactly("7494", "152");
         assertThat(result.getDrivers()).extracting(HeatData.DriverInfo::getName)
                 .containsExactly("Игнатий", "Анастасия");
+        assertThat(result.getDrivers()).extracting(HeatData.DriverInfo::getPosition)
+                .containsExactly("P1", "P2");
         assertThat(result.getLaps()).hasSize(1);
         assertThat(result.getLaps().get(0).getResults().get(0)).contains("2:22.523");
         assertThat(result.getLaps().get(0).getResults().get(1)).contains("P2");
+
+        List<HeatData.StintInfo> stints = result.getDrivers().get(0).getStints();
+        assertThat(stints).hasSize(1);
+        assertThat(stints.get(0).getNumber()).isEqualTo(1);
+        assertThat(stints.get(0).getKartNumber()).isEqualTo(33);
+        assertThat(stints.get(0).getBestLapMillis()).isEqualTo(142_523L);
+        assertThat(result.getDrivers().get(1).getStints()).isEmpty();
     }
 
     private static ParsedHeatData heatWithOneDriver() {
@@ -183,14 +220,25 @@ class HeatMapperTest {
         driver.setName("Игнатий");
         driver.setKartNumber(33);
         driver.setColumnIndex(0);
+
+        ParsedHeatData.ParsedStint stint = new ParsedHeatData.ParsedStint();
+        stint.setNumber(1);
+        stint.setKartNumber(33);
+        stint.setLapFrom(1);
+        stint.setLapTo(1);
+        stint.setLapsCount(1);
+        driver.setStints(List.of(stint));
         parsedData.setDrivers(List.of(driver));
 
         ParsedHeatData.ParsedLap lap = new ParsedHeatData.ParsedLap();
         lap.setLapNumber(1);
         lap.setRaceLapNumber(1);
+        lap.setStintIndex(1);
+        lap.setKartNumber(33);
         lap.setDriverSiteId("7494");
         lap.setLapTime("2:22.523");
         lap.setPosition("P1");
+        lap.setRacePosition("P1");
         lap.setColumnIndex(0);
         parsedData.setLaps(List.of(lap));
         return parsedData;

@@ -23,12 +23,12 @@ public class LapEntity {
 
     private Integer kartNumber;
     private Integer columnIndex;
-    private Integer lapNumber;
-    private Integer raceLapNumber; // Номер круга в гонке (с учётом смен карта)
-    private Integer stintIndex;    // Номер стинта (смены карта), начиная с 0
+    private Integer lapNumber;     // Номер круга гонки (первая колонка таблицы)
+    private Integer raceLapNumber; // То же, что lapNumber: нумерация на сайте сквозная
+    private Integer stintIndex;    // Номер стинта (смены карта), начиная с 1
     private String lapTime;      // Форматированное время как на сайте (m:ss.mmm или s.mmm) или "DNF"/пусто
     private Long lapTimeMillis; // Нормализованное время в миллисекундах для корректной сортировки/сравнения
-    private String position;    // Позиция внутри стинта ("P1", "P2" и т.д.)
+    private String position;    // Позиция в гонке на этом круге ("P1", "P2" и т.д.)
     private String racePosition; // Позиция в гонке на этом круге
     private String gapToLeader;
     private String gapToPrevious;
