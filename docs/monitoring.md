@@ -73,6 +73,9 @@ Actuator вынесен на отдельный порт `8081` (`management.ser
 | `karting_heat_cache_requests_total{hit}` | counter | попадание/промах кэша при `GET /api/heat/{id}` |
 | `karting_prefetch_queue` | gauge | заездов ждёт в очереди прогрева |
 | `karting_prefetch_scheduled` | gauge | заездов уже поставлено на прогрев |
+| `karting_polling_night` | gauge | ночной режим опроса сайта (1/0) |
+| `karting_polling_interval_seconds` | gauge | текущий интервал фонового опроса, секунды |
+| `karting_polling_runs_total{mode}` | counter | запуски фонового обновления: `mode=day` или `mode=night` |
 | `karting_live_ws_connected` | gauge | WebSocket к live-таймингу подключён (1/0) |
 | `karting_live_ws_reconnects_total` | counter | переподключения WebSocket |
 | `karting_live_messages_total` | counter | получено live-сообщений |
@@ -82,7 +85,26 @@ Actuator вынесен на отдельный порт `8081` (`management.ser
 | `karting_live_message_age_seconds` | gauge | возраст последнего live-сообщения |
 
 Кардинальность под контролем: в метках нет `heat_id` — только `uri`, `status`,
-`kind`, `result`, `hit`.
+`kind`, `result`, `hit`, `mode`.
+
+### Ночной режим опроса
+
+Заезды идут примерно с 09:45 до 22:00, поэтому ночью сайт опрашивается реже:
+интервал меняется с 30 секунд на 10 минут. В обычную ночь фоновое обновление
+не находит кандидатов и вообще не обращается к сайту.
+
+* окно по умолчанию — 23:00–08:00, настраивается `KARTING_POLLING_NIGHT_START`
+  и `KARTING_POLLING_NIGHT_END`;
+* интервалы — `KARTING_POLLING_DAY_INTERVAL` и `KARTING_POLLING_NIGHT_INTERVAL`;
+* ночью прогреваются только 5 последних заездов вместо 30
+  (`KARTING_POLLING_*_PREFETCH_LIMIT`);
+* live-WebSocket ночью переподключается не чаще раза в 10 минут
+  (`KARTING_POLLING_NIGHT_RECONNECT_DELAY`).
+
+Проверить режим можно в Prometheus: `karting_polling_night` (1 ночью),
+`karting_polling_interval_seconds` (600 ночью, 30 днём) и
+`karting_polling_runs_total{mode="night"}`. В логах при смене режима пишется
+строка «Опрос сайта: ночной режим, интервал PT10M».
 
 ## Дашборд
 
