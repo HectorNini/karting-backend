@@ -14,14 +14,22 @@ import org.springframework.stereotype.Component;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 @Component
 public class HeatMapper {
+
+    private static final Pattern GAP_PATTERN = Pattern.compile("[+-]?\\d+(?:\\.\\d+)?");
+    private static final Pattern LAPPED_PATTERN = Pattern.compile(".*\\d+\\s*[lL].*");
 
     private final DriverRepository driverRepository;
 
@@ -179,7 +187,128 @@ public class HeatMapper {
             dtoLaps.add(row);
         }
 
+        normalizeDuplicatePositions(dtoLaps);
+        applyFinalPositions(drivers, dtoLaps);
+
         return new HeatData(heat.getName(), heat.getRaceDate(), heat.getRaceTime(), drivers, dtoLaps);
+    }
+
+    /**
+     * Сайт иногда повторяет позицию в одном круге (например, P1 у двух пилотов).
+     * Для отображения разводим такие позиции по разрыву: пустой gap — лидер,
+     * затем меньший gap. Исходные значения gap не меняем.
+     */
+    private void normalizeDuplicatePositions(List<HeatData.LapRow> rows) {
+        for (HeatData.LapRow row : rows) {
+            List<HeatData.LapDetail> details = row.getDetails();
+            if (details == null || details.size() < 2) {
+                continue;
+            }
+
+            Set<Integer> seen = new HashSet<>();
+            boolean hasDuplicate = details.stream()
+                    .map(d -> parsePositionOrNull(positionOf(d)))
+                    .filter(Objects::nonNull)
+                    .anyMatch(position -> !seen.add(position));
+            if (!hasDuplicate) {
+                continue;
+            }
+
+            List<HeatData.LapDetail> ranked = new ArrayList<>(details);
+            ranked.sort(Comparator
+                    .comparingInt((HeatData.LapDetail d) -> {
+                        Integer position = parsePositionOrNull(positionOf(d));
+                        return position != null ? position : Integer.MAX_VALUE;
+                    })
+                    .thenComparingLong(d -> gapMillis(d.getGapToLeader()))
+                    .thenComparingLong(d -> gapMillis(d.getGapToPrevious()))
+                    .thenComparingLong(d -> d.getLapTimeMillis() != null
+                            ? d.getLapTimeMillis() : Long.MAX_VALUE)
+                    .thenComparingInt(d -> d.getColumnIndex() != null
+                            ? d.getColumnIndex() : Integer.MAX_VALUE));
+
+            int position = 1;
+            for (HeatData.LapDetail detail : ranked) {
+                String normalized = "P" + position++;
+                detail.setPosition(normalized);
+                detail.setRacePosition(normalized);
+            }
+
+            row.setResults(details.stream()
+                    .sorted(Comparator.comparingInt(
+                            d -> d.getColumnIndex() != null ? d.getColumnIndex() : Integer.MAX_VALUE))
+                    .map(this::formatResult)
+                    .collect(Collectors.toList()));
+        }
+    }
+
+    private void applyFinalPositions(List<HeatData.DriverInfo> drivers,
+                                     List<HeatData.LapRow> rows) {
+        Map<Integer, String> lastPositionByColumn = new HashMap<>();
+        for (HeatData.LapRow row : rows) {
+            if (row.getDetails() == null) {
+                continue;
+            }
+            for (HeatData.LapDetail detail : row.getDetails()) {
+                if (detail.getColumnIndex() != null && detail.getRacePosition() != null) {
+                    lastPositionByColumn.put(detail.getColumnIndex(), detail.getRacePosition());
+                }
+            }
+        }
+
+        for (HeatData.DriverInfo driver : drivers) {
+            String position = lastPositionByColumn.get(driver.getColumnIndex());
+            if (position != null) {
+                driver.setPosition(position);
+            }
+        }
+
+        Comparator<HeatData.DriverInfo> byPosition = Comparator.comparingInt(
+                d -> parsePosition(d.getPosition()));
+        Comparator<HeatData.DriverInfo> byLapsDesc = Comparator.comparingInt(
+                (HeatData.DriverInfo d) -> d.getTotalLaps() == null ? 0 : d.getTotalLaps()).reversed();
+        drivers.sort(byPosition.thenComparing(byLapsDesc));
+    }
+
+    private static String positionOf(HeatData.LapDetail detail) {
+        return detail.getRacePosition() != null ? detail.getRacePosition() : detail.getPosition();
+    }
+
+    private static Integer parsePositionOrNull(String position) {
+        int parsed = parsePosition(position);
+        return parsed == Integer.MAX_VALUE ? null : parsed;
+    }
+
+    private static long gapMillis(String gap) {
+        // У лидера сайт оставляет gap пустым; парсер сохраняет это как null.
+        if (gap == null) {
+            return 0L;
+        }
+        String trimmed = gap.trim();
+        if (trimmed.isEmpty()) {
+            return 0L;
+        }
+        if (LAPPED_PATTERN.matcher(trimmed).matches()) {
+            return Long.MAX_VALUE / 2;
+        }
+        Matcher matcher = GAP_PATTERN.matcher(trimmed);
+        if (!matcher.find()) {
+            return Long.MAX_VALUE;
+        }
+        try {
+            return Math.round(Double.parseDouble(matcher.group()) * 1000);
+        } catch (NumberFormatException e) {
+            return Long.MAX_VALUE;
+        }
+    }
+
+    private String formatResult(HeatData.LapDetail lap) {
+        String res = lap.getLapTime() != null ? lap.getLapTime() : "";
+        String pos = lap.getRacePosition() != null ? lap.getRacePosition() : lap.getPosition();
+        if (pos != null && !pos.isEmpty()) {
+            res = res.isEmpty() ? pos : res + " " + pos;
+        }
+        return res;
     }
 
     private static int parsePosition(String position) {

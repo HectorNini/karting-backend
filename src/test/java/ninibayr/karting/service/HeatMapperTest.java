@@ -209,6 +209,62 @@ class HeatMapperTest {
         assertThat(result.getDrivers().get(1).getStints()).isEmpty();
     }
 
+    @Test
+    @DisplayName("toDto: разводит дубли позиций по разрыву")
+    void toDto_shouldResolveDuplicatePositionsUsingGap() {
+        HeatEntity heatEntity = new HeatEntity();
+        heatEntity.setId(61L);
+        heatEntity.setSiteId("132395");
+        heatEntity.setName("Heat 25");
+        heatEntity.setRaceDate(LocalDate.of(2026, 10, 19));
+        heatEntity.setRaceTime(LocalTime.of(15, 2));
+
+        DriverEntity first = new DriverEntity();
+        first.setId(1L);
+        first.setSiteId("219");
+        first.setName("First");
+
+        DriverEntity second = new DriverEntity();
+        second.setId(2L);
+        second.setSiteId("1023");
+        second.setName("Second");
+
+        LapEntity firstFinish = lap(7, 0, 34, first, "1:02.416", "P1", null, null);
+        LapEntity secondFinish = lap(7, 1, 29, second, "1:12.799", "P1", "(~3.287)", "+3.287");
+        heatEntity.setLaps(List.of(firstFinish, secondFinish));
+
+        HeatData result = heatMapper.toDto(heatEntity);
+
+        assertThat(result.getLaps()).hasSize(1);
+        assertThat(result.getLaps().get(0).getDetails())
+                .extracting(HeatData.LapDetail::getRacePosition)
+                .containsExactly("P1", "P2");
+        assertThat(result.getLaps().get(0).getResults())
+                .containsExactly("1:02.416 P1", "1:12.799 P2");
+        assertThat(result.getDrivers())
+                .extracting(HeatData.DriverInfo::getPosition)
+                .containsExactly("P1", "P2");
+        assertThat(result.getLaps().get(0).getDetails().get(1).getGapToLeader())
+                .isEqualTo("(~3.287)");
+    }
+
+    private static LapEntity lap(int raceLap, int column, int kart, DriverEntity driver,
+                                 String time, String position, String gap, String interval) {
+        LapEntity lap = new LapEntity();
+        lap.setLapNumber(raceLap);
+        lap.setRaceLapNumber(raceLap);
+        lap.setColumnIndex(column);
+        lap.setKartNumber(kart);
+        lap.setDriver(driver);
+        lap.setLapTime(time);
+        lap.setLapTimeMillis(1L);
+        lap.setPosition(position);
+        lap.setRacePosition(position);
+        lap.setGapToLeader(gap);
+        lap.setGapToPrevious(interval);
+        return lap;
+    }
+
     private static ParsedHeatData heatWithOneDriver() {
         ParsedHeatData parsedData = new ParsedHeatData();
         parsedData.setName("Heat 33 ДЕТИ");
