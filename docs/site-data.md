@@ -28,7 +28,7 @@
 | 5 | `GET /tracks/{slug}/karts` | Таблица картов (по лучшему кругу) | ❌ |
 | 6 | `GET /tracks/{slug}/karts/{id}?p=1d` | Карточка карта | ❌ |
 | 7 | `GET /tracks/{slug}/heats/{id}/image` | PNG-превью заезда | ❌ |
-| 8 | `wss://timing.batyrshin.name/ws` | Live-тайминг: позиции, круги, stint-ы, gap-ы | ⚙️ проксируется: `POST /api/live/push/raw` → STOMP |
+| 8 | `wss://timing.batyrshin.name/ws` | Live-тайминг: позиции, круги, stint-ы, gap-ы | ✅ `LiveTimingClient` (WS) + ручная подача через `POST /api/live/push/raw` |
 | 9 | `GET /heats?t={tournamentId}` | Список заездов чемпионата (все трассы) | ❌ |
 | 10 | `GET /grids` | История гридов чемпионатов | ❌ |
 | 11 | `GET /tracks/{slug}/live` | SPA-обёртка live-тайминга | ❌ |
@@ -43,7 +43,8 @@
 TimingController  ──►  HeatService  ──►  HeatListParser        (список заездов: пагинация, лимит 200 → HTTP-ответ)
      GET /api/heats          │        └►  HeatSyncService ─► HeatParser ─► HeatMapper ─► Postgres
      GET /api/heat/{id}      │                    ▲
-                             └── кэш в БД ◄─────┘   (@Scheduled fixedDelay=30s, только сегодняшние/недавние заезды)
+                             └── кэш в БД ◄─────┘   (HeatSyncScheduler: день 30 с / ночь 10 мин,
+                                                      только сегодняшние/недавние заезды)
 
 LiveTimingController ──► LiveTimingService ──► SimpMessagingTemplate → /topic/live/{trackSlug}[/{heatId}]
      POST /api/live/push[/raw]        (приём сырых сообщений с wss://timing.batyrshin.name/ws и ретрансляция STOMP)
@@ -56,7 +57,9 @@ LiveTimingController ──► LiveTimingService ──► SimpMessagingTemplate
 | `controller` | `TimingController` | REST заездов, Swagger-аннотации, `CORS *` |
 | `controller` | `LiveTimingController` | приём live-данных (`/api/live/push`, `/api/live/push/raw`) |
 | `config` | `WebSocketConfig` | STOMP-брокер `/topic`, эндпоинт `/ws` (+ SockJS) |
-| `service` | `HeatService` | чтение из БД + фоллбэк на синхронизацию; шедулер |
+| `service` | `HeatService` | чтение из БД + фоллбэк на синхронизацию |
+| `service` | `HeatSyncScheduler` | планировщик фонового обновления (день/ночь) |
+| `service` | `SitePollingSchedule` | ночное окно и интервалы опроса |
 | `service` | `HeatSyncService` | upsert заезда (`REQUIRES_NEW`), парсинг → маппинг → сохранение |
 | `service` | `HeatListParser` | HTML → `HeatList` (список + пагинация + тип) |
 | `service` | `HeatParser` | HTML → `ParsedHeatData` (детали заезда) |
@@ -65,7 +68,7 @@ LiveTimingController ──► LiveTimingService ──► SimpMessagingTemplate
 | `service` | `TimingSiteFormats` | парсеры дат/времени сайта (`package-private`) |
 | `service` | `ParsedHeatData` | промежуточная модель «чистые данные с сайта» |
 | `dto` | `HeatList`, `HeatData`, `LiveHeatUpdate` | контракты REST API |
-| `entity` | `TrackEntity`, `HeatEntity`, `DriverEntity`, `LapEntity` | JPA |
+| `entity` | `TrackEntity`, `HeatEntity`, `DriverEntity`, `LapEntity`, `HeatStintEntity` | JPA |
 | `repository` | 3 репозитория | Spring Data JPA |
 
 ### Схема БД (`V1`…`V5`)
@@ -205,7 +208,7 @@ Fallback: если иконки нет — тип определяется по 
 
 ### 2.3 Ограничения выборки и пагинация
 
-* На одной странице ровно **50 заездов** (4 дня). Параметр `?page=N` сервером игнорируется.
+* На одной странице ровно **50 заездов** (≈2–3 дня при текущей загрузке трассы). Параметр `?page=N` сервером игнорируется.
 * Следующая страница отдаётся ссылкой `Next` с курсором:
   `<a class="page-link" href="/tracks/narvskaya/heats?start_time=1792335700"><b>Next</b></a>`,
   т.е. пагинация — по `?start_time={unix}`.
@@ -350,9 +353,9 @@ Fallback: если иконки нет — тип определяется по 
 |--------|----------|------|
 | название заезда | `h4` (клон, без `<small>`, « » → пробелы) | `ParsedHeatData.name` |
 | дата/время | `h4 small.text-body-secondary` → `d MMM yyyy, HH:mm` (EN) | `raceDate` / `raceTime` |
-| пилоты | `thead tr` #1 → `th[scope=col] a` → последний сегмент `href` | `drivers[].siteId`, `drivers[].name` |
-| стартовые позиции | `thead tr` #0 → `th[scope=col]` = `1`, `2`, … | `drivers[].startPosition` |
-| номера картов | `thead tr` #2 → `th[scope=col] a` → текст | `drivers[].kartNumber` (стартовый) |
+| пилоты | строка `thead` с `th` = `Driver` → `th[scope=col] a` → последний сегмент `href` | `drivers[].siteId`, `drivers[].name` |
+| стартовые позиции | строка `thead` с числовыми `th[scope=col]` = `1`, `2`, … | `drivers[].startPosition` |
+| номера картов | строка `thead` с `th` = `Kart` → `th[scope=col] a` → текст | `drivers[].kartNumber` (стартовый) |
 | круги | `tbody tr` → `th` (номер круга) + `td` (текст без `span`) | `laps[].lapTime` |
 | позиция в гонке | `span.p` | `laps[].position` и `laps[].racePosition` |
 | разрыв до лидера | `span.g` | `laps[].gapToLeader` (строкой, как есть) |
@@ -547,7 +550,7 @@ const f = new URLSearchParams(location.search).get("dev")
 
 * `LiveTimingClient` — постоянное подключение к `wss://timing.batyrshin.name/ws`
   (`java.net.http.WebSocket`), заголовок `Origin`, отправка `listen track:{slug}`,
-  переподключение с паузой 2→60 с, склейка фреймов.
+  переподключение с паузой 2→60 с (ночью — не чаще раза в 10 минут), склейка фреймов.
 * `LiveTimingService` — разбор JSON (включая производные `totalLaps`, `bestLapTime`,
   `lastLapTime`, `lastGapTime`), состояние live/waiting/finished, автоматическое завершение
   по тишине (`@Scheduled` каждые 10 с), STOMP-рассылка, подтягивание завершённой гонки в БД
@@ -567,8 +570,9 @@ const f = new URLSearchParams(location.search).get("dev")
 * REST:
   * `GET /api/live/current` — `{live, status, heat, lastUpdateAt, ageMs, startedAt, messages, staleTimeoutMs}`
     (`status`: `LIVE` | `WAITING` | `FINISHED` | `IDLE`) — основной эндпоинт для приложения;
-  * `GET /api/live/status` — диагностика подключения (`wsConnected`, `wsUrl`,
-    `reconnectAttempts`, `lastError`, `totalMessages`);
+  * `GET /api/live/status` — диагностика: `live`, `status`, `messages`, `totalMessages`,
+    `lastUpdateAt`, `ageMs`, `staleTimeoutMs`, `wsConnected`, `wsUrl`, `reconnectAttempts`,
+    `lastError`, `connectedAt` (без `heat` и `startedAt`);
   * `POST /api/live/stop` — принудительно завершить сессию (тесты/ручное управление);
   * `POST /api/live/push` и `POST /api/live/push/raw` — подать сообщение вручную (симуляция);
     оба проходят через тот же конечный автомат, что и реальные данные.
@@ -608,11 +612,13 @@ const f = new URLSearchParams(location.search).get("dev")
 ### 6.3. Симуляция без реальной гонки
 
 ```bash
-# отправить один и тот же снимок дважды с новым id — сессия станет live
+# отправить один и тот же снимок дважды — сессия станет live
 curl -X POST http://localhost:8080/api/live/push/raw \
-  -H 'Content-Type: application/json' --data-binary @live-sample.json
+  -H 'Content-Type: application/json' \
+  --data-binary @src/test/resources/live-sample.json
 curl -X POST http://localhost:8080/api/live/push/raw \
-  -H 'Content-Type: application/json' --data-binary @live-sample.json
+  -H 'Content-Type: application/json' \
+  --data-binary @src/test/resources/live-sample.json
 
 # завершить
 curl -X POST http://localhost:8080/api/live/stop
@@ -621,8 +627,9 @@ curl -X POST http://localhost:8080/api/live/stop
 curl http://localhost:8080/api/live/current
 ```
 
-Важно: `id` в снимке должен отличаться от реплея (иначе счётчик сообщений продолжит
-старую сессию). Для наглядности поменяйте `id`, `name` и `elapsed`.
+`id` в снимке можно оставить тем же, что у текущей сессии: счётчик сообщений
+дойдёт до 2, и сессия станет `LIVE`. Если нужна отдельная новая сессия, поменяйте
+`id` (а для наглядности — `name` и `elapsed`).
 
 ### 6.4. Как это показывает приложение
 
@@ -703,7 +710,8 @@ curl http://localhost:8080/api/live/current
 * **пересинхронизация старых заездов**: `POST /api/heats/resync?limit=N` перечитывает заезды,
   у которых есть круги, но нет стинтов; при открытии такого заезда он ставится в очередь
   автоматически;
-* **облегчённая фоновая синхронизация** (`fixedDelay = 30s`, только сегодняшние/недавно обновлённые заезды);
+* **облегчённая фоновая синхронизация** (`HeatSyncScheduler`: днём каждые 30 с, ночью раз в 10 мин;
+  только сегодняшние/недавние заезды);
 * **live-тайминг**: постоянное подключение к WebSocket сайта (`LiveTimingClient`), определение
   «гонка идёт прямо сейчас» (≥2 сообщения + отсутствие тишины 180 с), `GET /api/live/current`,
   `GET /api/live/status`, `POST /api/live/stop`, ретрансляция в STOMP `/topic/live/**`,
@@ -749,8 +757,10 @@ curl http://localhost:8080/api/live/current
 
 ### 10.3 🟢 ИСПРАВЛЕНО: фоновая синхронизация долбит сайт
 
-Ранее шедулер каждые 15 секунд обходил **все** заезды БД (≈200 запросов/мин). **Теперь период `30s` и
-синхронизируются только сегодняшние/недавно обновлённые заезды** (`HeatService.updateBackgroundCache`).
+Ранее шедулер каждые 15 секунд обходил **все** заезды БД (до 200 запросов за проход). **Теперь
+`HeatSyncScheduler` тикает раз в 30 с и запускает обновление по интервалу: днём — 30 с, ночью —
+10 мин. Синхронизируются только сегодняшние/недавно обновлённые заезды; ночью — только
+сегодняшние, стартовавшие в последние 2 часа** (`HeatService.updateBackgroundCache(night)`).
 
 ### 10.4 🟡 Топ-результат — разнородный свободный текст
 
@@ -823,10 +833,9 @@ curl -X POST "http://localhost:8080/api/heats/resync?limit=200"
 
 Эталонные HTML-файлы для парсер-тестов лежат в `src/test/resources/`
 (`heat112490.html` — 6 гонщиков по 3 стинта, `heat130516.html` — 12 гонщиков,
-двое с 3 стинтами и DNF). Тесты: `HeatParserTest`, `HeatMapperTest`.
-
-Скрипт-обходник выборки заездов с проверкой структуры шапки — `Survey.java` (см. историю анализа);
-рабочие копии HTML сохраняются в `%TEMP%\opencode\`.
+двое с 3 стинтами и DNF). Тесты: `HeatParserTest`, `HeatListParserTest`,
+`HeatMapperTest`, `HeatSyncServiceTest`, `LiveTimingServiceTest`,
+`HeatSyncSchedulerTest`, `SitePollingScheduleTest`.
 
 ---
 

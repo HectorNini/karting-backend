@@ -7,19 +7,23 @@
 
 ## Стек
 
-* Java 21, Spring Boot 3 (Web, Data JPA, Validation, Actuator, WebSocket/STOMP);
+* Java 21, Spring Boot 3 (Web, Data JPA, Actuator, WebSocket/STOMP);
 * PostgreSQL + Flyway;
 * Jsoup для разбора HTML-страниц сайта;
 * springdoc-openapi (Swagger UI на `/swagger-ui.html`).
 
 ## Быстрый старт
 
+Скопируйте `.env.example` в `.env` (Windows PowerShell:
+`Copy-Item .env.example .env`, Linux/macOS/Git Bash: `cp .env.example .env`),
+при необходимости поправьте пароль БД и трассу, затем:
+
 ```bash
-cp .env.example .env   # при необходимости поправьте пароль БД и трассу
 docker compose up --build -d
 ```
 
-Контейнеры: `karting_backend` (порт `8080`), `karting_postgres` (порт `5433`).
+Контейнеры: `karting_backend` (порт `8080`, Actuator — только `127.0.0.1:8081`)
+и `karting_postgres` (порт `5433`).
 
 Проверка:
 
@@ -28,6 +32,9 @@ curl http://localhost:8080/api/heats
 curl http://localhost:8080/api/live/current
 curl http://localhost:8080/api/live/status
 ```
+
+В PowerShell 5.1 `curl` — это алиас `Invoke-WebRequest`; для команд с `-X`
+используйте `curl.exe` (или `Invoke-RestMethod`).
 
 ## Переменные окружения
 
@@ -46,15 +53,16 @@ curl http://localhost:8080/api/live/status
 | `KARTING_POLLING_NIGHT_START` / `KARTING_POLLING_NIGHT_END` | `23:00` / `08:00` | ночное окно (может пересекать полночь) |
 | `KARTING_POLLING_DAY_PREFETCH_LIMIT` / `KARTING_POLLING_NIGHT_PREFETCH_LIMIT` | `30` / `5` | сколько последних заездов прогревать |
 | `KARTING_POLLING_NIGHT_RECONNECT_DELAY` | `10m` | минимальная пауза переподключения live-WS ночью |
-| `POSTGRES_DB` / `POSTGRES_USER` / `POSTGRES_PASSWORD` | — | доступ к БД |
+| `DB_HOST` / `DB_PORT` | `postgres` / `5432` | адрес PostgreSQL внутри docker-сети (без Docker — `localhost` / `5433`) |
+| `POSTGRES_DB` / `POSTGRES_USER` / `POSTGRES_PASSWORD` | — | доступ к БД (значения — в `.env.example`) |
 | `GRAFANA_ADMIN_USER` / `GRAFANA_ADMIN_PASSWORD` | `admin` / `admin` | вход в Grafana |
 
 ### Ночной режим опроса сайта
 
 Заезды идут примерно с 09:45 до 22:00, поэтому ночью фоновый опрос сайта
 замедляется: днём — каждые 30 секунд, ночью — раз в 10 минут. В обычную ночь
-фоновое обновление не обращается к сайту: оно трогает только заезды, которые
-стартовали не позже двух часов назад (то есть ещё могли идти).
+фоновое обновление не обращается к сайту: оно трогает только сегодняшние заезды,
+стартовавшие не раньше двух часов назад (то есть ещё могли идти).
 
 Окно и интервалы настраиваются переменными `KARTING_POLLING_*` из таблицы выше.
 Ночью также уменьшается прогрев кэша (5 заездов вместо 30) и увеличивается
@@ -82,6 +90,7 @@ docker compose --profile observability up -d
 |-------|------|----------|
 | `GET` | `/api/heats` | список последних заездов (до 200) |
 | `GET` | `/api/heat/{id}` | заезд с кругами (из БД или с сайта) |
+| `POST` | `/api/heats/resync?limit=N` | перечитать заезды без стинтов (по умолчанию 20, максимум 200) |
 | `GET` | `/api/live/current` | идёт ли гонка сейчас + последний снимок |
 | `GET` | `/api/live/status` | диагностика live-подключения |
 | `POST` | `/api/live/stop` | принудительно завершить live-сессию |
@@ -97,6 +106,7 @@ docker compose --profile observability up -d
   "heat": { "heatId": "133304", "heatName": "Финал 3", "elapsed": 444968, "drivers": [] },
   "lastUpdateAt": 1792971409441,
   "ageMs": 1200,
+  "startedAt": 1792970965000,
   "messages": 5,
   "staleTimeoutMs": 180000
 }
@@ -117,8 +127,11 @@ docker compose --profile observability up -d
 
 ## Тесты
 
+Maven Wrapper уже в репозитории:
+
 ```bash
-mvn test
+./mvnw test        # Linux/macOS/Git Bash
+.\mvnw.cmd test    # Windows PowerShell
 ```
 
 ## Swagger

@@ -84,8 +84,9 @@ Actuator вынесен на отдельный порт `8081` (`management.ser
 | `karting_live_active` | gauge | идёт ли live-сессия (1/0) |
 | `karting_live_message_age_seconds` | gauge | возраст последнего live-сообщения |
 
-Кардинальность под контролем: в метках нет `heat_id` — только `uri`, `status`,
-`kind`, `result`, `hit`, `mode`.
+Кардинальность под контролем: в доменных метках нет `heat_id`/`driver_id` — только
+ограниченные наборы (`kind`, `result`, `hit`, `mode`). Стандартные метрики добавляют
+`uri`, `status`, `method`, `outcome`, `exception`.
 
 ### Ночной режим опроса
 
@@ -137,8 +138,9 @@ Docker API-exporter.
 
 ## Данные и сброс
 
-Prometheus хранит метрики 15 дней в томе `karting_prometheus_data`, Grafana —
-состояние в `karting_grafana_data`. Полный сброс:
+Prometheus хранит метрики 15 дней в томе `karting_prometheus_data`
+(Docker-имя — `karting-backend_karting_prometheus_data`), Grafana — состояние в
+`karting_grafana_data` (Docker-имя — `karting-backend_karting_grafana_data`). Полный сброс:
 
 ```bash
 docker compose --profile observability down
