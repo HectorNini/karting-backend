@@ -14,6 +14,7 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.WebSocket;
 import java.time.Duration;
+import java.time.LocalTime;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -35,6 +36,7 @@ public class LiveTimingClient {
     private static final long[] BACKOFF_MS = {2_000, 5_000, 10_000, 15_000, 20_000, 30_000, 45_000, 60_000};
 
     private final LiveTimingService liveTimingService;
+    private final SitePollingSchedule schedule;
 
     @Value("${karting.live.enabled:true}")
     private boolean enabled;
@@ -69,8 +71,10 @@ public class LiveTimingClient {
     private volatile long connectedAt;
     private volatile boolean shuttingDown;
 
-    public LiveTimingClient(LiveTimingService liveTimingService, MeterRegistry meterRegistry) {
+    public LiveTimingClient(LiveTimingService liveTimingService, SitePollingSchedule schedule,
+                            MeterRegistry meterRegistry) {
         this.liveTimingService = liveTimingService;
+        this.schedule = schedule;
         Gauge.builder("karting.live.ws.connected", this, c -> c.connected ? 1 : 0)
                 .description("Подключён ли WebSocket к live-таймингу (1/0)")
                 .register(meterRegistry);
@@ -133,6 +137,10 @@ public class LiveTimingClient {
         }
         int index = Math.min(attempt, BACKOFF_MS.length - 1);
         long delay = BACKOFF_MS[index];
+        // Ночью сессий нет: не долбим сайт каждую минуту, ждём дольше.
+        if (schedule.isNight(LocalTime.now())) {
+            delay = Math.max(delay, schedule.nightReconnectDelay().toMillis());
+        }
         attempt++;
         reconnects.increment();
         log.info("Live WS: переподключение через {} мс (попытка {})", delay, attempt);

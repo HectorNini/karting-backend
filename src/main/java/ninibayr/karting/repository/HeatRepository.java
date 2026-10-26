@@ -7,6 +7,9 @@ import org.springframework.data.jpa.repository.Lock;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.LocalTime;
 import java.util.List;
 import java.util.Optional;
 
@@ -32,4 +35,26 @@ public interface HeatRepository extends JpaRepository<HeatEntity, Long> {
             order by h.id desc
             """)
     List<HeatEntity> findMissingStints(Pageable pageable);
+
+    /**
+     * Кандидаты для дневного фонового обновления: сегодняшние заезды и всё,
+     * что менялось после cutoff. Вместо findAll() — чтобы не тянуть всю БД.
+     */
+    @Query("""
+            select h from HeatEntity h
+            where h.raceDate = :today or h.lastUpdated > :cutoff
+            """)
+    List<HeatEntity> findDayCandidates(@Param("today") LocalDate today,
+                                       @Param("cutoff") LocalDateTime cutoff);
+
+    /**
+     * Кандидаты для ночного обновления: только заезды, которые ещё могли идти
+     * (сегодня и стартовали не раньше fromTime). В обычную ночь — пусто.
+     */
+    @Query("""
+            select h from HeatEntity h
+            where h.raceDate = :today and h.raceTime >= :fromTime
+            """)
+    List<HeatEntity> findNightCandidates(@Param("today") LocalDate today,
+                                         @Param("fromTime") LocalTime fromTime);
 }

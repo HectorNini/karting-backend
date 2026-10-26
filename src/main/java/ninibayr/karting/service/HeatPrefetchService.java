@@ -10,6 +10,7 @@ import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Service;
 
+import java.time.LocalTime;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -27,14 +28,13 @@ import java.util.concurrent.TimeUnit;
 @Slf4j
 public class HeatPrefetchService {
 
-    /** Сколько последних заездов прогревать. */
-    private static final int PREFETCH_LIMIT = 30;
     /** Пауза между запросами к сайту, мс. */
     private static final long DELAY_MS = 700;
 
     private final HeatRepository heatRepository;
     private final HeatSyncService heatSyncService;
     private final HeatListParser heatListParser;
+    private final SitePollingSchedule schedule;
 
     private final ThreadPoolExecutor executor = new ThreadPoolExecutor(
             1, 1, 0L, TimeUnit.MILLISECONDS, new LinkedBlockingQueue<>(), r -> {
@@ -52,10 +52,12 @@ public class HeatPrefetchService {
     public HeatPrefetchService(HeatRepository heatRepository,
                                HeatSyncService heatSyncService,
                                HeatListParser heatListParser,
+                               SitePollingSchedule schedule,
                                MeterRegistry meterRegistry) {
         this.heatRepository = heatRepository;
         this.heatSyncService = heatSyncService;
         this.heatListParser = heatListParser;
+        this.schedule = schedule;
         Gauge.builder("karting.prefetch.queue", executor,
                         ex -> ex.getQueue().size())
                 .description("Сколько заездов ждёт в очереди фонового прогрева")
@@ -87,11 +89,14 @@ public class HeatPrefetchService {
 
     private void prefetchRecent() {
         try {
+            LocalTime now = LocalTime.now();
+            int limit = schedule.prefetchLimit(now);
             HeatList list = heatListParser.parseCurrentTrack();
             List<HeatList.HeatItem> items = list.getHeats().stream()
-                    .limit(PREFETCH_LIMIT)
+                    .limit(limit)
                     .toList();
-            log.info("Фоновый прогрев: {} заездов", items.size());
+            log.info("Фоновый прогрев: {} заездов ({} режим)", items.size(),
+                    schedule.isNight(now) ? "ночной" : "дневной");
 
             for (HeatList.HeatItem item : items) {
                 String id = item.getId();

@@ -7,14 +7,12 @@ import ninibayr.karting.dto.HeatList;
 import ninibayr.karting.entity.HeatEntity;
 import ninibayr.karting.repository.HeatRepository;
 import org.springframework.data.domain.PageRequest;
-import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.List;
-import java.util.stream.Collectors;
 
 @Service
 @Slf4j
@@ -92,39 +90,38 @@ public class HeatService {
         return updated;
     }
 
-    @Scheduled(fixedDelay = 30000)
+    /**
+     * Фоновое обновление заездов. Вызывается планировщиком, который сам решает,
+     * когда пора: днём каждые 30 секунд, ночью — раз в 10 минут.
+     *
+     * <p>Днём обновляем сегодняшние заезды и всё, что менялось за последние 6 часов.
+     * Ночью — только те, что могли ещё идти (стартовали не позже 2 часов назад),
+     * поэтому в обычную ночь сайт вообще не опрашивается.</p>
+     *
+     * @param night ночной режим (редкий опрос)
+     */
     @Transactional
-    public void updateBackgroundCache() {
-        List<HeatEntity> allHeats = heatRepository.findAll();
-        if (allHeats.isEmpty()) {
-            return;
-        }
+    public void updateBackgroundCache(boolean night) {
         LocalDate today = LocalDate.now();
         LocalDateTime now = LocalDateTime.now();
-        LocalDateTime cutoff = now.minusHours(6);
         // Не синхронизируем повторно заезд чаще, чем раз в 5 минут — иначе
         // бесконечный цикл «обновили → lastUpdated стал свежим → снова обновили».
         LocalDateTime minAge = now.minusMinutes(5);
-        List<HeatEntity> toUpdate = allHeats.stream()
-                .filter(h -> {
-                    if (h.getLastUpdated() != null && h.getLastUpdated().isAfter(minAge)) {
-                        return false; // обновлён совсем недавно — пропускаем
-                    }
-                    if (h.getRaceDate() != null && h.getRaceDate().isEqual(today)) {
-                        return true;
-                    }
-                    if (h.getLastUpdated() != null && h.getLastUpdated().isAfter(cutoff)) {
-                        return true;
-                    }
-                    // если нет дат - обновляем только очень недавно добавленные
-                    if (h.getRaceDate() == null) {
-                        return h.getLastUpdated() != null && h.getLastUpdated().isAfter(LocalDateTime.now().minusHours(2));
-                    }
-                    return false;
-                })
-                .collect(Collectors.toList());
 
-        log.info("Фоновое обновление: всего в БД: {}, к обновлению (активные/недавние): {}", allHeats.size(), toUpdate.size());
+        List<HeatEntity> candidates = night
+                ? heatRepository.findNightCandidates(today, now.minusHours(2).toLocalTime())
+                : heatRepository.findDayCandidates(today, now.minusHours(6));
+
+        List<HeatEntity> toUpdate = candidates.stream()
+                .filter(h -> h.getLastUpdated() == null || !h.getLastUpdated().isAfter(minAge))
+                .toList();
+
+        if (toUpdate.isEmpty()) {
+            log.debug("Фоновое обновление ({}): нечего обновлять", night ? "ночь" : "день");
+            return;
+        }
+
+        log.info("Фоновое обновление ({}): к обновлению {} заездов", night ? "ночь" : "день", toUpdate.size());
 
         for (HeatEntity entity : toUpdate) {
             try {
