@@ -22,9 +22,9 @@ import java.util.Map;
 public class HeatListParser {
 
     /** Максимальное число заездов, которое отдаём в списке. */
-    private static final int MAX_HEATS = 100;
-    /** Защита от бесконечного цикла при обходе страниц пагинации. */
-    private static final int MAX_PAGES = 10;
+    private static final int MAX_HEATS = 200;
+    /** Защита от бесконечного цикла при обходе страниц пагинации (10 заездов на страницу). */
+    private static final int MAX_PAGES = 20;
 
     @Value("${karting.user-agent}")
     private String userAgent;
