@@ -66,5 +66,11 @@ public class LiveHeatUpdate {
         private Long time;
         private Long gapTime;
         private Integer kartNum;
+        /**
+         * Когда сайт получил этот круг (epoch ms). Нужен, чтобы восстановить
+         * фактическое время заезда, если сайт не отдаёт elapsed (для заездов
+         * он обычно равен 0).
+         */
+        private Long receivedAt;
     }
 }

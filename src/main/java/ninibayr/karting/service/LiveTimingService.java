@@ -66,6 +66,14 @@ public class LiveTimingService {
     private volatile boolean stoppedManually;
 
     /**
+     * Последнее elapsed, полученное от сайта (мс). Для заездов сайт обычно
+     * присылает 0, поэтому в этом случае время считается по receivedAt кругов.
+     */
+    private volatile Long siteElapsed;
+    /** Когда siteElapsed был получен (epoch ms). */
+    private volatile long siteElapsedAt;
+
+    /**
      * История картов по стинтам, собранная из live-обновлений:
      * driverId → (номер стинта → номер карта). Нужна, чтобы проставлять карт
      * каждому кругу: сайт обычно присылает {@code laps[].kartNum = null}.
@@ -132,6 +140,9 @@ public class LiveTimingService {
                 currentHeatId = update.getHeatId();
                 messagesForCurrentHeat = 0;
                 live = false;
+                startedAt = 0;
+                siteElapsed = null;
+                siteElapsedAt = 0;
                 stintKarts.clear();
                 log.info("Live-тайминг: новая сессия {} (id {})", update.getHeatName(), update.getHeatId());
             }
@@ -153,12 +164,17 @@ public class LiveTimingService {
             }
 
             recordStintKarts(update.getDrivers());
-            if (current.getElapsed() != null) {
-                startedAt = now - current.getElapsed();
+
+            // Сайт для гонок присылает elapsed, а для заездов обычно 0.
+            // Запоминаем только осмысленное значение: 0 — это «нет таймера».
+            if (update.getElapsed() != null && update.getElapsed() > 0) {
+                siteElapsed = update.getElapsed();
+                siteElapsedAt = now;
             }
 
             // Одно сообщение — это «последнее состояние» с сервера, а не живая гонка.
             live = messagesForCurrentHeat >= LIVE_CONFIRM_MESSAGES;
+            applyDerivedElapsed(now);
             started = live && !wasLive;
             ended = !live && wasLive;
             if (ended) {
@@ -191,6 +207,7 @@ public class LiveTimingService {
         synchronized (lock) {
             if (live && lastMessageAt > 0 && System.currentTimeMillis() - lastMessageAt > staleTimeoutMs) {
                 live = false;
+                applyDerivedElapsed(lastMessageAt);
                 finished = current;
             }
         }
@@ -208,6 +225,9 @@ public class LiveTimingService {
         synchronized (lock) {
             changed = live;
             live = false;
+            if (changed) {
+                applyDerivedElapsed(lastMessageAt > 0 ? lastMessageAt : System.currentTimeMillis());
+            }
             stoppedManually = current != null;
         }
         if (changed) {
@@ -231,6 +251,104 @@ public class LiveTimingService {
         } catch (Exception e) {
             log.debug("Не удалось поставить заезд {} на синхронизацию: {}", heatId, e.getMessage());
         }
+    }
+
+    /**
+     * id сессии, которая идёт прямо сейчас, или {@code null}. Учитывает
+     * stale-таймаут: если сайт замолчал, заезд больше не считается live
+     * и снова появляется в общем списке.
+     */
+    public String getLiveHeatId() {
+        synchronized (lock) {
+            boolean stillFresh = lastMessageAt > 0
+                    && System.currentTimeMillis() - lastMessageAt <= staleTimeoutMs;
+            return live && stillFresh ? currentHeatId : null;
+        }
+    }
+
+    /**
+     * Считает время сессии. Для гонок сайт присылает elapsed, для заездов —
+     * почти всегда 0. В последнем случае восстанавливаем старт по кругам:
+     * {@code receivedAt - time} первого круга. Для завершённой сессии
+     * останавливаем счёт на последнем полученном круге, для живой — на now.
+     */
+    private void applyDerivedElapsed(long now) {
+        LiveHeatUpdate heat = current;
+        if (heat == null) {
+            return;
+        }
+
+        Long sessionStart = findSessionStart(heat);
+        Long lastLapAt = findLastLapAt(heat);
+
+        if (siteElapsed != null && siteElapsed > 0) {
+            long elapsed = siteElapsed;
+            if (siteElapsedAt > 0 && now > siteElapsedAt) {
+                // Сайт может присылать elapsed не в каждом сообщении.
+                elapsed += now - siteElapsedAt;
+            }
+            elapsed = Math.max(0, elapsed);
+            heat.setElapsed(elapsed);
+            startedAt = sessionStart != null ? sessionStart : now - elapsed;
+            return;
+        }
+
+        if (sessionStart != null) {
+            long end = live ? now : (lastLapAt != null ? lastLapAt : now);
+            long elapsed = Math.max(0, end - sessionStart);
+            heat.setElapsed(elapsed);
+            startedAt = sessionStart;
+            return;
+        }
+
+        Long existing = heat.getElapsed();
+        if (existing != null && existing > 0) {
+            startedAt = now - existing;
+        }
+    }
+
+    private static Long findSessionStart(LiveHeatUpdate heat) {
+        if (heat.getDrivers() == null) {
+            return null;
+        }
+        Long earliest = null;
+        for (LiveHeatUpdate.LiveDriver driver : heat.getDrivers()) {
+            if (driver == null || driver.getLaps() == null) {
+                continue;
+            }
+            for (LiveHeatUpdate.LiveLap lap : driver.getLaps()) {
+                if (lap == null || lap.getReceivedAt() == null
+                        || lap.getTime() == null || lap.getTime() <= 0) {
+                    continue;
+                }
+                long start = lap.getReceivedAt() - lap.getTime();
+                if (earliest == null || start < earliest) {
+                    earliest = start;
+                }
+            }
+        }
+        return earliest;
+    }
+
+    private static Long findLastLapAt(LiveHeatUpdate heat) {
+        if (heat.getDrivers() == null) {
+            return null;
+        }
+        Long latest = null;
+        for (LiveHeatUpdate.LiveDriver driver : heat.getDrivers()) {
+            if (driver == null || driver.getLaps() == null) {
+                continue;
+            }
+            for (LiveHeatUpdate.LiveLap lap : driver.getLaps()) {
+                if (lap == null || lap.getReceivedAt() == null) {
+                    continue;
+                }
+                if (latest == null || lap.getReceivedAt() > latest) {
+                    latest = lap.getReceivedAt();
+                }
+            }
+        }
+        return latest;
     }
 
     // ------------------------------------------------------------------
@@ -634,6 +752,9 @@ public class LiveTimingService {
             }
             if (l.hasNonNull("kartNum")) {
                 lap.setKartNum(l.get("kartNum").asInt());
+            }
+            if (l.hasNonNull("receivedAt")) {
+                lap.setReceivedAt(l.get("receivedAt").asLong());
             }
             laps.add(lap);
         }

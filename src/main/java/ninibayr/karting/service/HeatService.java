@@ -23,16 +23,20 @@ public class HeatService {
     private final HeatMapper heatMapper;
     private final HeatListParser heatListParser;
     private final HeatPrefetchService heatPrefetchService;
+    private final LiveTimingService liveTimingService;
     private final MeterRegistry meterRegistry;
 
     public HeatService(HeatRepository heatRepository, HeatSyncService heatSyncService,
                        HeatMapper heatMapper, HeatListParser heatListParser,
-                       HeatPrefetchService heatPrefetchService, MeterRegistry meterRegistry) {
+                       HeatPrefetchService heatPrefetchService,
+                       LiveTimingService liveTimingService,
+                       MeterRegistry meterRegistry) {
         this.heatRepository = heatRepository;
         this.heatSyncService = heatSyncService;
         this.heatMapper = heatMapper;
         this.heatListParser = heatListParser;
         this.heatPrefetchService = heatPrefetchService;
+        this.liveTimingService = liveTimingService;
         this.meterRegistry = meterRegistry;
         // Регистрируем заранее, чтобы в Prometheus были нули, а не «нет данных».
         meterRegistry.counter("karting.heat.cache.requests", "hit", "true");
@@ -139,6 +143,18 @@ public class HeatService {
     public HeatList getHeatList() {
         try {
             HeatList list = heatListParser.parseCurrentTrack();
+            String liveHeatId = liveTimingService.getLiveHeatId();
+            if (liveHeatId != null) {
+                // Сайт уже показывает текущий заезд в общем списке, но он ещё
+                // не завершён. Показываем его только после окончания сессии.
+                List<HeatList.HeatItem> visible = list.getHeats().stream()
+                        .filter(item -> !liveHeatId.equals(item.getId()))
+                        .toList();
+                if (visible.size() != list.getHeats().size()) {
+                    log.debug("Скрываем текущий live-заезд {} из общего списка", liveHeatId);
+                    list.setHeats(visible);
+                }
+            }
             // Прогреваем кэш последних заездов в фоне, чтобы открытие было мгновенным.
             heatPrefetchService.prefetchRecentAsync();
             return list;

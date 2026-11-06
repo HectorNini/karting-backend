@@ -227,7 +227,8 @@ class LiveTimingServiceTest {
 
         LiveHeatUpdate heat = service.getSnapshot(1_001_100L).getHeat();
 
-        assertThat(heat.getElapsed()).isEqualTo(10_000L);
+        // elapsed продолжает идти, даже если сайт не прислал его в дельте.
+        assertThat(heat.getElapsed()).isEqualTo(11_000L);
         assertThat(heat.getPitstopTimeThreshold()).isEqualTo(70_000L);
         assertThat(heat.getPitlaneKarts()).containsExactly(10);
     }
@@ -299,5 +300,69 @@ class LiveTimingServiceTest {
         assertThat(heat.getDrivers()).hasSize(1);
         assertThat(heat.getDrivers().get(0).getDriverId()).isEqualTo("3");
         assertThat(heat.getElapsed()).isNull();
+    }
+
+    // ------------------------------------------------------------------
+    // Время заезда по receivedAt (сайт присылает elapsed = 0 для заездов)
+    // ------------------------------------------------------------------
+
+    private static final String HEAT_WITH_RECEIVED_AT = """
+            {"id":900,"name":"Heat 9","elapsed":0,"mode":1,
+             "drivers":[
+               {"driver":{"id":"1","name":"A"},"number":1,"position":1,
+                "stint":{"kart":9,"number":1,"length":2},
+                "laps":[
+                  {"stintNum":1,"number":1,"time":60000,"receivedAt":1000000},
+                  {"stintNum":1,"number":2,"time":62000,"receivedAt":1062000}
+                ]}
+             ]}
+            """;
+
+    @Test
+    @DisplayName("parse: читает receivedAt круга")
+    void parse_readsLapReceivedAt() {
+        LiveHeatUpdate update = service.parseFromJson(HEAT_WITH_RECEIVED_AT);
+
+        assertThat(update.getDrivers().get(0).getLaps().get(0).getReceivedAt())
+                .isEqualTo(1_000_000L);
+    }
+
+    @Test
+    @DisplayName("live id: текущий заезд скрывается из списка только пока сессия свежая")
+    void getLiveHeatId_onlyWhileFresh() {
+        long now = System.currentTimeMillis();
+
+        service.handleUpdate(service.parseFromJson(HEAT_WITH_RECEIVED_AT), now - 1_000);
+        service.handleUpdate(service.parseFromJson(HEAT_WITH_RECEIVED_AT), now);
+
+        assertThat(service.getLiveHeatId()).isEqualTo("900");
+
+        service.stopLive();
+
+        assertThat(service.getLiveHeatId()).isNull();
+    }
+
+    @Test
+    @DisplayName("heat: при elapsed=0 время считается от старта по receivedAt")
+    void heatWithZeroElapsed_derivesTimeFromLapReceivedAt() {
+        LiveHeatUpdate update = service.parseFromJson(HEAT_WITH_RECEIVED_AT);
+
+        // Одно сообщение — это ещё не live, но общее время уже можно показать:
+        // старт первого круга 1_000_000 - 60_000 = 940_000,
+        // последний круг получен в 1_062_000.
+        service.handleUpdate(update, 1_100_000L);
+        LiveSnapshot waiting = service.getSnapshot(1_100_000L);
+
+        assertThat(waiting.isLive()).isFalse();
+        assertThat(waiting.getHeat().getElapsed()).isEqualTo(122_000L);
+        assertThat(waiting.getStartedAt()).isEqualTo(940_000L);
+
+        // В live время идёт до текущего момента, а не до последнего круга.
+        service.handleUpdate(service.parseFromJson(HEAT_WITH_RECEIVED_AT), 1_110_000L);
+        LiveSnapshot live = service.getSnapshot(1_110_000L);
+
+        assertThat(live.isLive()).isTrue();
+        assertThat(live.getHeat().getElapsed()).isEqualTo(170_000L);
+        assertThat(live.getStartedAt()).isEqualTo(940_000L);
     }
 }
