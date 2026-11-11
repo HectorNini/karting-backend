@@ -4,6 +4,9 @@ import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
 import lombok.extern.slf4j.Slf4j;
 import ninibayr.karting.dto.HeatList;
+import ninibayr.karting.exception.SiteRateLimitedException;
+import org.jsoup.Connection;
+import org.jsoup.HttpStatusException;
 import org.jsoup.Jsoup;
 import org.jsoup.nodes.Document;
 import org.jsoup.nodes.Element;
@@ -11,6 +14,7 @@ import org.jsoup.select.Elements;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
+import java.io.IOException;
 import java.time.LocalDate;
 import java.time.MonthDay;
 import java.time.Year;
@@ -39,21 +43,62 @@ public class HeatListParser {
     private String baseUrl;
 
     private final MeterRegistry meterRegistry;
+    private final SiteRequestGate siteRequestGate;
+    private final long cacheTtlMs;
+    private final Object refreshLock = new Object();
 
-    public HeatListParser(MeterRegistry meterRegistry) {
+    private volatile HeatList cachedList;
+    private volatile long cachedAt;
+
+    public HeatListParser(
+            MeterRegistry meterRegistry,
+            SiteRequestGate siteRequestGate,
+            @Value("${karting.list.cache-ttl-ms:20000}") long cacheTtlMs) {
         this.meterRegistry = meterRegistry;
+        this.siteRequestGate = siteRequestGate;
+        this.cacheTtlMs = Math.max(0, cacheTtlMs);
         meterRegistry.counter("karting.site.fetch.failures", "kind", "list");
     }
 
     public HeatList parseCurrentTrack() throws Exception {
-        Timer.Sample sample = Timer.start(meterRegistry);
-        try {
-            return doParseCurrentTrack();
-        } finally {
-            sample.stop(Timer.builder("karting.list.parse")
-                    .description("Полный цикл разбора списка заездов (все страницы)")
-                    .publishPercentileHistogram()
-                    .register(meterRegistry));
+        HeatList cached = cachedList;
+        long now = System.currentTimeMillis();
+        if (cached != null && now - cachedAt < cacheTtlMs) {
+            return cached;
+        }
+
+        synchronized (refreshLock) {
+            cached = cachedList;
+            now = System.currentTimeMillis();
+            if (cached != null && now - cachedAt < cacheTtlMs) {
+                return cached;
+            }
+
+            Timer.Sample sample = Timer.start(meterRegistry);
+            try {
+                HeatList fresh = doParseCurrentTrack();
+                cachedList = fresh;
+                cachedAt = System.currentTimeMillis();
+                return fresh;
+            } catch (SiteRateLimitedException e) {
+                if (cached != null) {
+                    log.warn("Список заездов: сайт ограничил запросы, отдаём кэш {} с: {}",
+                            (System.currentTimeMillis() - cachedAt) / 1000, e.getMessage());
+                    return cached;
+                }
+                throw e;
+            } catch (Exception e) {
+                if (cached != null) {
+                    log.warn("Список заездов: ошибка сайта, отдаём кэш: {}", e.getMessage());
+                    return cached;
+                }
+                throw e;
+            } finally {
+                sample.stop(Timer.builder("karting.list.parse")
+                        .description("Полный цикл разбора списка заездов (все страницы)")
+                        .publishPercentileHistogram()
+                        .register(meterRegistry));
+            }
         }
     }
 
@@ -70,11 +115,23 @@ public class HeatListParser {
         while (url != null && page < MAX_PAGES && byId.size() < MAX_HEATS) {
             long pageStartedAt = System.nanoTime();
             try {
-                Document doc = Jsoup.connect(url)
+                siteRequestGate.beforeRequest();
+                Connection.Response response = Jsoup.connect(url)
                         .userAgent(userAgent)
                         .timeout(10000)
                         .maxBodySize(0)
-                        .get();
+                        .ignoreHttpErrors(true)
+                        .execute();
+                int status = response.statusCode();
+                if (siteRequestGate.isRateLimitStatus(status)) {
+                    throw siteRequestGate.rateLimited(status, response.header("Retry-After"));
+                }
+                if (status >= 400) {
+                    throw new HttpStatusException("HTTP error fetching URL", status, url);
+                }
+                siteRequestGate.onSuccess();
+                Document doc = response.parse();
+
                 recordFetch("ok", pageStartedAt);
                 meterRegistry.counter("karting.list.pages").increment();
 
@@ -93,6 +150,21 @@ public class HeatListParser {
                 }
                 url = nextHref.startsWith("http") ? nextHref : baseUrl.substring(0, baseUrl.indexOf("/tracks")) + nextHref;
                 page++;
+            } catch (SiteRateLimitedException e) {
+                recordFetch("error", pageStartedAt);
+                meterRegistry.counter("karting.site.fetch.failures", "kind", "list").increment();
+                throw e;
+            } catch (HttpStatusException e) {
+                recordFetch("error", pageStartedAt);
+                meterRegistry.counter("karting.site.fetch.failures", "kind", "list").increment();
+                log.warn("Не удалось загрузить страницу списка заездов: {} (HTTP {})", url, e.getStatusCode());
+                break;
+            } catch (IOException e) {
+                siteRequestGate.transportError();
+                recordFetch("error", pageStartedAt);
+                meterRegistry.counter("karting.site.fetch.failures", "kind", "list").increment();
+                log.warn("Не удалось загрузить страницу списка заездов: {}", url, e);
+                break;
             } catch (Exception e) {
                 recordFetch("error", pageStartedAt);
                 meterRegistry.counter("karting.site.fetch.failures", "kind", "list").increment();

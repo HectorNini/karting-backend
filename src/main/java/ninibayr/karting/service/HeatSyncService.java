@@ -4,14 +4,9 @@ import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
 import lombok.extern.slf4j.Slf4j;
 import ninibayr.karting.dto.HeatData;
-import ninibayr.karting.entity.HeatEntity;
-import ninibayr.karting.entity.TrackEntity;
-import ninibayr.karting.repository.HeatRepository;
-import ninibayr.karting.repository.TrackRepository;
+import ninibayr.karting.exception.SiteRateLimitedException;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Propagation;
-import org.springframework.transaction.annotation.Transactional;
 
 import java.util.concurrent.TimeUnit;
 
@@ -19,10 +14,8 @@ import java.util.concurrent.TimeUnit;
 @Slf4j
 public class HeatSyncService {
 
-    private final TrackRepository trackRepository;
-    private final HeatRepository heatRepository;
     private final HeatParser heatParser;
-    private final HeatMapper heatMapper;
+    private final HeatPersistenceService heatPersistenceService;
     private final MeterRegistry meterRegistry;
 
     @Value("${karting.track.slug}")
@@ -31,62 +24,32 @@ public class HeatSyncService {
     @Value("${karting.base-url}")
     private String baseUrl;
 
-    public HeatSyncService(TrackRepository trackRepository, HeatRepository heatRepository,
-                           HeatParser heatParser, HeatMapper heatMapper,
+    public HeatSyncService(HeatParser heatParser,
+                           HeatPersistenceService heatPersistenceService,
                            MeterRegistry meterRegistry) {
-        this.trackRepository = trackRepository;
-        this.heatRepository = heatRepository;
         this.heatParser = heatParser;
-        this.heatMapper = heatMapper;
+        this.heatPersistenceService = heatPersistenceService;
         this.meterRegistry = meterRegistry;
     }
 
-    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    /**
+     * Скачивает и разбирает заезд, затем сохраняет его короткой транзакцией.
+     * Сетевой запрос выполняется вне транзакции БД.
+     */
     public HeatData syncHeat(String heatSiteId) {
         long startedAt = System.nanoTime();
         try {
-            return doSyncHeat(heatSiteId, startedAt);
-        } catch (RuntimeException e) {
-            recordSync("error", startedAt);
-            throw e;
-        }
-    }
-
-    private HeatData doSyncHeat(String heatSiteId, long startedAt) {
-        try {
-            TrackEntity track = trackRepository.findBySlug(trackSlug)
-                    .orElseThrow(() -> new RuntimeException("Трасса '" + trackSlug + "' не найдена в БД"));
-
-            // 1. ПАТТЕРН UPSERT: Находим существующий или готовим новый.
-            // Блокируем строку заезда, чтобы две синхронизации одного заезда
-            // (шедулер + открытие в приложении) не шли параллельно и не ловили
-            // конфликт уникальности стинтов.
-            HeatEntity heatEntity = heatRepository.findBySiteIdForUpdate(heatSiteId).orElseGet(() -> {
-                HeatEntity newHeat = new HeatEntity();
-                newHeat.setSiteId(heatSiteId);
-                newHeat.setTrack(track);
-                return newHeat;
-            });
-
             String url = baseUrl + "/" + trackSlug + "/heats/" + heatSiteId;
-
-            // 2. Парсим свежие данные
             ParsedHeatData parsedData = heatParser.parse(url);
-
-            // 3. Обновляем сущность (внутри очистятся старые круги и добавятся новые)
-            heatMapper.updateEntity(heatEntity, parsedData, track);
-
-            // 4. Сохраняем. Hibernate увидит, что у heatEntity есть ID (если он был найден),
-            // и выполнит UPDATE, а не INSERT.
-            heatRepository.save(heatEntity);
-
-            log.info("Успешно синхронизировано (обновлено): {} (ID: {}), кругов: {}",
-                    heatEntity.getName(), heatSiteId, heatEntity.getLaps().size());
-
+            HeatData data = heatPersistenceService.persist(heatSiteId, parsedData);
             recordSync("ok", startedAt);
-            return heatMapper.toDto(heatEntity);
-
+            return data;
+        } catch (SiteRateLimitedException e) {
+            recordSync("rate_limited", startedAt);
+            log.warn("Синхронизация заезда {} отложена: {}", heatSiteId, e.getMessage());
+            throw e;
         } catch (Exception e) {
+            recordSync("error", startedAt);
             log.error("Критическая ошибка синхронизации для {}: {}", heatSiteId, e.getMessage(), e);
             throw new RuntimeException("Не удалось получить данные для заезда " + heatSiteId, e);
         }

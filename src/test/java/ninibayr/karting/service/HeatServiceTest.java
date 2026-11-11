@@ -1,6 +1,7 @@
 package ninibayr.karting.service;
 
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import ninibayr.karting.dto.HeatData;
 import ninibayr.karting.dto.HeatList;
 import ninibayr.karting.repository.HeatRepository;
 import org.junit.jupiter.api.BeforeEach;
@@ -12,8 +13,10 @@ import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -25,7 +28,7 @@ class HeatServiceTest {
     @Mock
     private HeatSyncService heatSyncService;
     @Mock
-    private HeatMapper heatMapper;
+    private HeatReadService heatReadService;
     @Mock
     private HeatListParser heatListParser;
     @Mock
@@ -40,7 +43,7 @@ class HeatServiceTest {
         heatService = new HeatService(
                 heatRepository,
                 heatSyncService,
-                heatMapper,
+                heatReadService,
                 heatListParser,
                 heatPrefetchService,
                 liveTimingService,
@@ -72,6 +75,19 @@ class HeatServiceTest {
         assertThat(result.getHeats())
                 .extracting(HeatList.HeatItem::getId)
                 .containsExactly("100", "101");
+    }
+
+    @Test
+    @DisplayName("heat: отдаёт заезд из кэша без синхронизации")
+    void getHeatData_returnsCachedHeat() {
+        HeatData data = new HeatData("Heat 1", null, null, List.of(), List.of());
+        when(heatReadService.findCached("100"))
+                .thenReturn(Optional.of(new HeatReadService.CachedHeat(data, false)));
+
+        HeatData result = heatService.getHeatData("100");
+
+        assertThat(result).isSameAs(data);
+        verify(heatSyncService, never()).syncHeat("100");
     }
 
     private static HeatList listWith(String... ids) {

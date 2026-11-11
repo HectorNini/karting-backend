@@ -5,6 +5,7 @@ import io.micrometer.core.instrument.MeterRegistry;
 import lombok.extern.slf4j.Slf4j;
 import ninibayr.karting.dto.HeatList;
 import ninibayr.karting.entity.HeatEntity;
+import ninibayr.karting.exception.SiteRateLimitedException;
 import ninibayr.karting.repository.HeatRepository;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.event.EventListener;
@@ -17,6 +18,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Фоновый «прогрев» кэша: заранее подтягивает с сайта заезды из списка,
@@ -28,13 +30,11 @@ import java.util.concurrent.TimeUnit;
 @Slf4j
 public class HeatPrefetchService {
 
-    /** Пауза между запросами к сайту, мс. */
-    private static final long DELAY_MS = 700;
-
     private final HeatRepository heatRepository;
     private final HeatSyncService heatSyncService;
     private final HeatListParser heatListParser;
     private final SitePollingSchedule schedule;
+    private final SiteRequestGate siteRequestGate;
 
     private final ThreadPoolExecutor executor = new ThreadPoolExecutor(
             1, 1, 0L, TimeUnit.MILLISECONDS, new LinkedBlockingQueue<>(), r -> {
@@ -49,15 +49,22 @@ public class HeatPrefetchService {
     /** Заезды, которые сейчас принудительно перечитываются (без проверки кэша). */
     private final Set<String> resyncing = ConcurrentHashMap.newKeySet();
 
+    private final AtomicBoolean running = new AtomicBoolean(false);
+
+    /** После rate limit не запускаем новый прогрев до этого времени. */
+    private volatile long retryAfterAt;
+
     public HeatPrefetchService(HeatRepository heatRepository,
                                HeatSyncService heatSyncService,
                                HeatListParser heatListParser,
                                SitePollingSchedule schedule,
+                               SiteRequestGate siteRequestGate,
                                MeterRegistry meterRegistry) {
         this.heatRepository = heatRepository;
         this.heatSyncService = heatSyncService;
         this.heatListParser = heatListParser;
         this.schedule = schedule;
+        this.siteRequestGate = siteRequestGate;
         Gauge.builder("karting.prefetch.queue", executor,
                         ex -> ex.getQueue().size())
                 .description("Сколько заездов ждёт в очереди фонового прогрева")
@@ -81,10 +88,19 @@ public class HeatPrefetchService {
      * повторный вызов не создаёт вторую очередь.
      */
     public void prefetchRecentAsync() {
-        if (!scheduled.isEmpty()) {
+        if (System.currentTimeMillis() < retryAfterAt) {
+            return;
+        }
+        if (!scheduled.isEmpty() || !running.compareAndSet(false, true)) {
             return; // прогрев уже запущен
         }
-        executor.submit(this::prefetchRecent);
+        executor.submit(() -> {
+            try {
+                prefetchRecent();
+            } finally {
+                running.set(false);
+            }
+        });
     }
 
     private void prefetchRecent() {
@@ -103,25 +119,37 @@ public class HeatPrefetchService {
                 if (!scheduled.add(id)) {
                     continue;
                 }
+                if (siteRequestGate.isCoolingDown()) {
+                    backOff("сайт на cooldown");
+                    return;
+                }
                 try {
                     // Уже есть в БД — не трогаем, данные подтянутся фоновой синхронизацией.
                     if (heatRepository.findBySiteId(id).isPresent()) {
                         continue;
                     }
                     heatSyncService.syncHeat(id);
-                    Thread.sleep(DELAY_MS);
-                } catch (InterruptedException ie) {
-                    Thread.currentThread().interrupt();
+                } catch (SiteRateLimitedException e) {
+                    backOff(e.getMessage());
                     return;
                 } catch (Exception e) {
                     log.warn("Прогрев заезда {} не удался: {}", id, e.getMessage());
                 }
             }
             log.info("Фоновый прогрев завершён");
+        } catch (SiteRateLimitedException e) {
+            backOff(e.getMessage());
         } catch (Exception e) {
             log.warn("Фоновый прогрев не удался: {}", e.getMessage());
             scheduled.clear(); // разрешаем повторить позже
         }
+    }
+
+    private void backOff(String reason) {
+        long seconds = Math.max(1, siteRequestGate.remainingCooldownSeconds());
+        retryAfterAt = System.currentTimeMillis() + seconds * 1_000 + 1_000;
+        scheduled.clear();
+        log.warn("Фоновый прогрев остановлен: {}. Повтор через {} с", reason, seconds);
     }
 
     /** Есть ли заезд в локальном кэше БД. */
@@ -134,11 +162,20 @@ public class HeatPrefetchService {
         if (isCached(heatSiteId) || !scheduled.add(heatSiteId)) {
             return;
         }
+        if (siteRequestGate.isCoolingDown()) {
+            scheduled.remove(heatSiteId);
+            log.debug("Прогрев заезда {} отложен: сайт на cooldown", heatSiteId);
+            return;
+        }
         executor.submit(() -> {
             try {
                 heatSyncService.syncHeat(heatSiteId);
+            } catch (SiteRateLimitedException e) {
+                log.warn("Прогрев заезда {} отложен: {}", heatSiteId, e.getMessage());
             } catch (Exception e) {
                 log.warn("Прогрев заезда {} не удался: {}", heatSiteId, e.getMessage());
+            } finally {
+                scheduled.remove(heatSiteId);
             }
         });
     }
@@ -152,9 +189,16 @@ public class HeatPrefetchService {
         if (heatSiteId == null || !resyncing.add(heatSiteId)) {
             return;
         }
+        if (siteRequestGate.isCoolingDown()) {
+            resyncing.remove(heatSiteId);
+            log.debug("Пересинхронизация заезда {} отложена: сайт на cooldown", heatSiteId);
+            return;
+        }
         executor.submit(() -> {
             try {
                 heatSyncService.syncHeat(heatSiteId);
+            } catch (SiteRateLimitedException e) {
+                log.warn("Пересинхронизация заезда {} отложена: {}", heatSiteId, e.getMessage());
             } catch (Exception e) {
                 log.warn("Пересинхронизация заезда {} не удалась: {}", heatSiteId, e.getMessage());
             } finally {

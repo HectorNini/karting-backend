@@ -5,35 +5,40 @@ import lombok.extern.slf4j.Slf4j;
 import ninibayr.karting.dto.HeatData;
 import ninibayr.karting.dto.HeatList;
 import ninibayr.karting.entity.HeatEntity;
+import ninibayr.karting.exception.SiteRateLimitedException;
 import ninibayr.karting.repository.HeatRepository;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 
 @Service
 @Slf4j
 public class HeatService {
 
+    /** Не обновляем за один тик больше, чем нужно: сайт не любит пачки запросов. */
+    private static final int MAX_SYNCS_PER_RUN = 3;
+
     private final HeatRepository heatRepository;
     private final HeatSyncService heatSyncService;
-    private final HeatMapper heatMapper;
+    private final HeatReadService heatReadService;
     private final HeatListParser heatListParser;
     private final HeatPrefetchService heatPrefetchService;
     private final LiveTimingService liveTimingService;
     private final MeterRegistry meterRegistry;
 
     public HeatService(HeatRepository heatRepository, HeatSyncService heatSyncService,
-                       HeatMapper heatMapper, HeatListParser heatListParser,
+                       HeatReadService heatReadService, HeatListParser heatListParser,
                        HeatPrefetchService heatPrefetchService,
                        LiveTimingService liveTimingService,
                        MeterRegistry meterRegistry) {
         this.heatRepository = heatRepository;
         this.heatSyncService = heatSyncService;
-        this.heatMapper = heatMapper;
+        this.heatReadService = heatReadService;
         this.heatListParser = heatListParser;
         this.heatPrefetchService = heatPrefetchService;
         this.liveTimingService = liveTimingService;
@@ -45,33 +50,36 @@ public class HeatService {
 
     /**
      * Быстрое чтение с фоллбэком на синхронизацию.
-     * readOnly = true здесь безопасен, так как мы не делаем запись в этом методе.
-     * Если данных нет, мы делегируем запись другому сервису (heatSyncService),
-     * и Spring AOP корректно откроет для него новую транзакцию.
+     *
+     * <p>Кэш читается в короткой транзакции внутри {@link HeatReadService}.
+     * Если заезда нет, синхронизация выполняется уже без открытой транзакции,
+     * поэтому сетевой запрос к сайту не держит соединение с БД.</p>
      */
-    @Transactional(readOnly = true)
     public HeatData getHeatData(String heatSiteId) {
-        return heatRepository.findBySiteId(heatSiteId)
-                .map(heat -> {
-                    meterRegistry.counter("karting.heat.cache.requests", "hit", "true").increment();
-                    // Данные старого парсера: стинтов ещё нет. Отдаём кэш сразу,
-                    // а в фоне перечитываем заезд — приложение обновляется каждые 5 с.
-                    if (heat.getStints().isEmpty() && !heat.getLaps().isEmpty()) {
-                        log.info("Заезд {} без стинтов — ставим на пересинхронизацию", heatSiteId);
-                        heatPrefetchService.resyncOneAsync(heatSiteId);
-                    }
-                    return heatMapper.toDto(heat);
-                })
-                .orElseGet(() -> {
-                    meterRegistry.counter("karting.heat.cache.requests", "hit", "false").increment();
-                    log.info("Заезд {} не найден в БД, запускаем синхронизацию...", heatSiteId);
-                    try {
-                        return heatSyncService.syncHeat(heatSiteId);
-                    } catch (Exception e) {
-                        log.error("Синхронизация заезда {} не удалась: {}", heatSiteId, e.getMessage());
-                        throw new RuntimeException("Не удалось загрузить заезд " + heatSiteId + ". Попробуйте обновить список или повторить позже.", e);
-                    }
-                });
+        Optional<HeatReadService.CachedHeat> cached = heatReadService.findCached(heatSiteId);
+        if (cached.isPresent()) {
+            meterRegistry.counter("karting.heat.cache.requests", "hit", "true").increment();
+            HeatReadService.CachedHeat heat = cached.get();
+            // Данные старого парсера: стинтов ещё нет. Отдаём кэш сразу,
+            // а в фоне перечитываем заезд — приложение обновляется каждые 5 с.
+            if (heat.needsResync()) {
+                log.info("Заезд {} без стинтов — ставим на пересинхронизацию", heatSiteId);
+                heatPrefetchService.resyncOneAsync(heatSiteId);
+            }
+            return heat.data();
+        }
+
+        meterRegistry.counter("karting.heat.cache.requests", "hit", "false").increment();
+        log.info("Заезд {} не найден в БД, запускаем синхронизацию...", heatSiteId);
+        try {
+            return heatSyncService.syncHeat(heatSiteId);
+        } catch (SiteRateLimitedException e) {
+            log.warn("Синхронизация заезда {} отложена: {}", heatSiteId, e.getMessage());
+            throw e;
+        } catch (Exception e) {
+            log.error("Синхронизация заезда {} не удалась: {}", heatSiteId, e.getMessage());
+            throw new RuntimeException("Не удалось загрузить заезд " + heatSiteId + ". Попробуйте обновить список или повторить позже.", e);
+        }
     }
 
     /**
@@ -86,6 +94,9 @@ public class HeatService {
             try {
                 heatSyncService.syncHeat(heat.getSiteId());
                 updated++;
+            } catch (SiteRateLimitedException e) {
+                log.warn("Пересинхронизация остановлена: {}", e.getMessage());
+                break;
             } catch (Exception e) {
                 log.warn("Пересинхронизация заезда {} не удалась: {}", heat.getSiteId(), e.getMessage());
             }
@@ -104,7 +115,6 @@ public class HeatService {
      *
      * @param night ночной режим (редкий опрос)
      */
-    @Transactional
     public void updateBackgroundCache(boolean night) {
         LocalDate today = LocalDate.now();
         LocalDateTime now = LocalDateTime.now();
@@ -118,6 +128,7 @@ public class HeatService {
 
         List<HeatEntity> toUpdate = candidates.stream()
                 .filter(h -> h.getLastUpdated() == null || !h.getLastUpdated().isAfter(minAge))
+                .limit(MAX_SYNCS_PER_RUN)
                 .toList();
 
         if (toUpdate.isEmpty()) {
@@ -130,9 +141,8 @@ public class HeatService {
         for (HeatEntity entity : toUpdate) {
             try {
                 heatSyncService.syncHeat(entity.getSiteId());
-                Thread.sleep(1500); // простая задержка чтобы не долбить сайт
-            } catch (InterruptedException ie) {
-                Thread.currentThread().interrupt();
+            } catch (SiteRateLimitedException e) {
+                log.warn("Фоновое обновление остановлено: {}", e.getMessage());
                 break;
             } catch (Exception e) {
                 log.error("Ошибка фонового обновления для {}: {}", entity.getSiteId(), e.getMessage());
@@ -142,22 +152,28 @@ public class HeatService {
 
     public HeatList getHeatList() {
         try {
-            HeatList list = heatListParser.parseCurrentTrack();
+            HeatList parsed = heatListParser.parseCurrentTrack();
+            // Нельзя менять список, который лежит в кэше парсера: иначе
+            // скрытый live-заезд останется скрытым и после завершения сессии.
+            HeatList result = new HeatList(parsed.getTrackName(), new ArrayList<>(parsed.getHeats()));
             String liveHeatId = liveTimingService.getLiveHeatId();
             if (liveHeatId != null) {
                 // Сайт уже показывает текущий заезд в общем списке, но он ещё
                 // не завершён. Показываем его только после окончания сессии.
-                List<HeatList.HeatItem> visible = list.getHeats().stream()
+                List<HeatList.HeatItem> visible = result.getHeats().stream()
                         .filter(item -> !liveHeatId.equals(item.getId()))
                         .toList();
-                if (visible.size() != list.getHeats().size()) {
+                if (visible.size() != result.getHeats().size()) {
                     log.debug("Скрываем текущий live-заезд {} из общего списка", liveHeatId);
-                    list.setHeats(visible);
+                    result.setHeats(visible);
                 }
             }
             // Прогреваем кэш последних заездов в фоне, чтобы открытие было мгновенным.
             heatPrefetchService.prefetchRecentAsync();
-            return list;
+            return result;
+        } catch (SiteRateLimitedException e) {
+            log.warn("Список заездов временно недоступен: {}", e.getMessage());
+            throw e;
         } catch (Exception e) {
             log.error("Не удалось получить список заездов", e);
             throw new RuntimeException("Не удалось получить список заездов. Проверьте подключение к сети.", e);

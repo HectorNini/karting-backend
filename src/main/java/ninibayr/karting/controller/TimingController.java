@@ -22,11 +22,10 @@ public class TimingController {
     @Operation(summary = "Получить список всех заездов", description = "Возвращает список доступных заездов с их ID, именем и временем")
     @GetMapping("/heats")
     public HeatList getHeatList() {
-        try {
-            return heatService.getHeatList();
-        } catch (Exception e) {
-            throw new RuntimeException("Ошибка получения списка заездов: " + e.getMessage(), e);
-        }
+        // Не оборачиваем исключения здесь: SiteRateLimitedException должен
+        // дойти до GlobalExceptionHandler и превратиться в 503 + Retry-After,
+        // а не в общий 500.
+        return heatService.getHeatList();
     }
 
     @Operation(summary = "Получить детали конкретного заезда", description = "Возвращает имена гонщиков и результаты по кругам для указанного ID заезда")

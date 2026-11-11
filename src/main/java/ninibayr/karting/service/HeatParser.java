@@ -3,6 +3,9 @@ package ninibayr.karting.service;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
 import lombok.extern.slf4j.Slf4j;
+import ninibayr.karting.exception.SiteRateLimitedException;
+import org.jsoup.Connection;
+import org.jsoup.HttpStatusException;
 import org.jsoup.Jsoup;
 import org.jsoup.nodes.Document;
 import org.jsoup.nodes.Element;
@@ -10,6 +13,7 @@ import org.jsoup.select.Elements;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
+import java.io.IOException;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -26,12 +30,14 @@ import java.util.regex.Pattern;
 public class HeatParser {
 
     private final MeterRegistry meterRegistry;
+    private final SiteRequestGate siteRequestGate;
 
     @Value("${karting.user-agent}")
     private String userAgent;
 
-    public HeatParser(MeterRegistry meterRegistry) {
+    public HeatParser(MeterRegistry meterRegistry, SiteRequestGate siteRequestGate) {
         this.meterRegistry = meterRegistry;
+        this.siteRequestGate = siteRequestGate;
         meterRegistry.counter("karting.site.fetch.failures", "kind", "heat");
     }
 
@@ -39,12 +45,32 @@ public class HeatParser {
         long startedAt = System.nanoTime();
         Document doc;
         try {
-            doc = Jsoup.connect(url)
+            siteRequestGate.beforeRequest();
+            Connection.Response response = Jsoup.connect(url)
                     .userAgent(userAgent)
                     .timeout(10000)
                     .maxBodySize(0)
-                    .get();
-        } catch (Exception e) {
+                    .ignoreHttpErrors(true)
+                    .execute();
+            int status = response.statusCode();
+            if (siteRequestGate.isRateLimitStatus(status)) {
+                throw siteRequestGate.rateLimited(status, response.header("Retry-After"));
+            }
+            if (status >= 400) {
+                throw new HttpStatusException("HTTP error fetching URL", status, url);
+            }
+            siteRequestGate.onSuccess();
+            doc = response.parse();
+        } catch (SiteRateLimitedException e) {
+            recordFetch("heat", "error", startedAt);
+            meterRegistry.counter("karting.site.fetch.failures", "kind", "heat").increment();
+            throw e;
+        } catch (HttpStatusException e) {
+            recordFetch("heat", "error", startedAt);
+            meterRegistry.counter("karting.site.fetch.failures", "kind", "heat").increment();
+            throw e;
+        } catch (IOException e) {
+            siteRequestGate.transportError();
             recordFetch("heat", "error", startedAt);
             meterRegistry.counter("karting.site.fetch.failures", "kind", "heat").increment();
             throw e;

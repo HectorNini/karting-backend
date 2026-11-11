@@ -15,7 +15,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 class HeatParserTest {
 
-    private final HeatParser heatParser = new HeatParser(new io.micrometer.core.instrument.simple.SimpleMeterRegistry());
+    private final io.micrometer.core.instrument.simple.SimpleMeterRegistry registry =
+            new io.micrometer.core.instrument.simple.SimpleMeterRegistry();
+    private final HeatParser heatParser = new HeatParser(registry,
+            new SiteRequestGate(0, 60_000, 600_000, registry));
 
     @Test
     @DisplayName("parse: достаёт дату заезда и siteId гонщиков из HTML")

@@ -1,6 +1,7 @@
 package ninibayr.karting.exception;
 
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.ExceptionHandler;
@@ -13,6 +14,25 @@ import java.util.Map;
 @RestControllerAdvice
 @Slf4j
 public class GlobalExceptionHandler {
+
+    @ExceptionHandler(SiteRateLimitedException.class)
+    public ResponseEntity<Map<String, Object>> handleSiteRateLimited(SiteRateLimitedException ex) {
+        log.warn("Сайт тайминга временно ограничил запросы: {}", ex.getMessage());
+
+        Map<String, Object> body = new HashMap<>();
+        body.put("timestamp", LocalDateTime.now().toString());
+        body.put("status", HttpStatus.SERVICE_UNAVAILABLE.value());
+        body.put("error", "Service Unavailable");
+        body.put("message", ex.getMessage());
+        body.put("retryAfterSeconds", ex.getRetryAfterSeconds());
+        if (ex.getUpstreamStatus() > 0) {
+            body.put("upstreamStatus", ex.getUpstreamStatus());
+        }
+
+        return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+                .header(HttpHeaders.RETRY_AFTER, String.valueOf(ex.getRetryAfterSeconds()))
+                .body(body);
+    }
 
     @ExceptionHandler(RuntimeException.class)
     public ResponseEntity<Map<String, Object>> handleRuntimeException(RuntimeException ex) {
