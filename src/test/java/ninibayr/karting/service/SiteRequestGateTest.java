@@ -25,6 +25,16 @@ class SiteRequestGateTest {
     }
 
     @Test
+    @DisplayName("После 429 фоновая пауза длиннее пользовательского cooldown")
+    void rateLimited_shouldPauseBackgroundLonger() {
+        gate.rateLimited(429, "2");
+
+        assertThat(gate.isBackgroundPaused()).isTrue();
+        assertThat(gate.remainingBackgroundPauseSeconds())
+                .isGreaterThan(gate.remainingCooldownSeconds());
+    }
+
+    @Test
     @DisplayName("429/403/5xx считаются rate limit, остальные HTTP-ошибки — нет")
     void isRateLimitStatus_shouldClassifyStatuses() {
         assertThat(gate.isRateLimitStatus(429)).isTrue();

@@ -82,13 +82,18 @@ public class HeatListParser {
                 return fresh;
             } catch (SiteRateLimitedException e) {
                 if (cached != null) {
+                    long staleAgeSeconds = (System.currentTimeMillis() - cachedAt) / 1000;
+                    // Продлеваем жизнь старого кэша, чтобы каждый следующий запрос
+                    // не пытался снова долбить сайт во время rate limit.
+                    cachedAt = System.currentTimeMillis();
                     log.warn("Список заездов: сайт ограничил запросы, отдаём кэш {} с: {}",
-                            (System.currentTimeMillis() - cachedAt) / 1000, e.getMessage());
+                            staleAgeSeconds, e.getMessage());
                     return cached;
                 }
                 throw e;
             } catch (Exception e) {
                 if (cached != null) {
+                    cachedAt = System.currentTimeMillis();
                     log.warn("Список заездов: ошибка сайта, отдаём кэш: {}", e.getMessage());
                     return cached;
                 }

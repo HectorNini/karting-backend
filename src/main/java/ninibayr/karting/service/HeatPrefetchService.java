@@ -88,7 +88,7 @@ public class HeatPrefetchService {
      * повторный вызов не создаёт вторую очередь.
      */
     public void prefetchRecentAsync() {
-        if (System.currentTimeMillis() < retryAfterAt) {
+        if (System.currentTimeMillis() < retryAfterAt || siteRequestGate.isBackgroundPaused()) {
             return;
         }
         if (!scheduled.isEmpty() || !running.compareAndSet(false, true)) {
@@ -105,6 +105,11 @@ public class HeatPrefetchService {
 
     private void prefetchRecent() {
         try {
+            if (siteRequestGate.isBackgroundPaused()) {
+                log.debug("Фоновый прогрев отложен: сайт на паузе ещё {} с",
+                        siteRequestGate.remainingBackgroundPauseSeconds());
+                return;
+            }
             LocalTime now = LocalTime.now();
             int limit = schedule.prefetchLimit(now);
             HeatList list = heatListParser.parseCurrentTrack();
@@ -119,8 +124,8 @@ public class HeatPrefetchService {
                 if (!scheduled.add(id)) {
                     continue;
                 }
-                if (siteRequestGate.isCoolingDown()) {
-                    backOff("сайт на cooldown");
+                if (siteRequestGate.isCoolingDown() || siteRequestGate.isBackgroundPaused()) {
+                    backOff("сайт на cooldown/паузе");
                     return;
                 }
                 try {
@@ -146,7 +151,9 @@ public class HeatPrefetchService {
     }
 
     private void backOff(String reason) {
-        long seconds = Math.max(1, siteRequestGate.remainingCooldownSeconds());
+        long seconds = Math.max(siteRequestGate.remainingCooldownSeconds(),
+                siteRequestGate.remainingBackgroundPauseSeconds());
+        seconds = Math.max(1, seconds);
         retryAfterAt = System.currentTimeMillis() + seconds * 1_000 + 1_000;
         scheduled.clear();
         log.warn("Фоновый прогрев остановлен: {}. Повтор через {} с", reason, seconds);
@@ -162,9 +169,9 @@ public class HeatPrefetchService {
         if (isCached(heatSiteId) || !scheduled.add(heatSiteId)) {
             return;
         }
-        if (siteRequestGate.isCoolingDown()) {
+        if (siteRequestGate.isCoolingDown() || siteRequestGate.isBackgroundPaused()) {
             scheduled.remove(heatSiteId);
-            log.debug("Прогрев заезда {} отложен: сайт на cooldown", heatSiteId);
+            log.debug("Прогрев заезда {} отложен: сайт на cooldown/паузе", heatSiteId);
             return;
         }
         executor.submit(() -> {
@@ -189,9 +196,9 @@ public class HeatPrefetchService {
         if (heatSiteId == null || !resyncing.add(heatSiteId)) {
             return;
         }
-        if (siteRequestGate.isCoolingDown()) {
+        if (siteRequestGate.isCoolingDown() || siteRequestGate.isBackgroundPaused()) {
             resyncing.remove(heatSiteId);
-            log.debug("Пересинхронизация заезда {} отложена: сайт на cooldown", heatSiteId);
+            log.debug("Пересинхронизация заезда {} отложена: сайт на cooldown/паузе", heatSiteId);
             return;
         }
         executor.submit(() -> {

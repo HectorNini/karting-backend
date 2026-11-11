@@ -35,6 +35,8 @@ class HeatServiceTest {
     private HeatPrefetchService heatPrefetchService;
     @Mock
     private LiveTimingService liveTimingService;
+    @Mock
+    private SiteRequestGate siteRequestGate;
 
     private HeatService heatService;
 
@@ -47,6 +49,7 @@ class HeatServiceTest {
                 heatListParser,
                 heatPrefetchService,
                 liveTimingService,
+                siteRequestGate,
                 new SimpleMeterRegistry());
     }
 

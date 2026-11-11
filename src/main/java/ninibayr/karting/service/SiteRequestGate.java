@@ -52,6 +52,9 @@ public class SiteRequestGate {
     /** Сколько подряд было ошибок 429/403/5xx/сети. */
     private final AtomicInteger consecutiveFailures = new AtomicInteger();
 
+    /** После rate limit фоновые задачи не трогают сайт дольше, чем пользователь. */
+    private volatile long backgroundPauseUntil;
+
     public SiteRequestGate(
             @Value("${karting.site.min-request-interval-ms:1500}") long minIntervalMs,
             @Value("${karting.site.base-cooldown-ms:60000}") long baseCooldownMs,
@@ -136,6 +139,12 @@ public class SiteRequestGate {
 
         long until = now + delayMs;
         cooldownUntil.accumulateAndGet(until, Math::max);
+
+        // Фон не должен занимать первый же слот после окончания cooldown:
+        // иначе он снова получит 429 и сайт никогда не «отпустит» IP.
+        long backgroundDelayMs = Math.min(maxCooldownMs, Math.max(delayMs * 5, 300_000L));
+        backgroundPauseUntil = Math.max(backgroundPauseUntil, now + backgroundDelayMs);
+
         rateLimitedCounter.increment();
 
         long seconds = Math.max(1, (delayMs + 999) / 1_000);
@@ -148,8 +157,10 @@ public class SiteRequestGate {
     public void transportError() {
         int failures = consecutiveFailures.incrementAndGet();
         long delayMs = Math.min(backoffMs(failures), maxCooldownMs);
-        long until = System.currentTimeMillis() + delayMs;
+        long now = System.currentTimeMillis();
+        long until = now + delayMs;
         cooldownUntil.accumulateAndGet(until, Math::max);
+        backgroundPauseUntil = Math.max(backgroundPauseUntil, now + Math.min(maxCooldownMs, delayMs * 5));
         log.warn("Сетевая ошибка при запросе к сайту тайминга, cooldown {} мс", delayMs);
     }
 
@@ -163,6 +174,16 @@ public class SiteRequestGate {
 
     public long remainingCooldownSeconds() {
         long remaining = cooldownUntil.get() - System.currentTimeMillis();
+        return remaining <= 0 ? 0 : (remaining + 999) / 1_000;
+    }
+
+    /** После rate limit фоновому прогреву и шедулеру лучше подождать дольше. */
+    public boolean isBackgroundPaused() {
+        return System.currentTimeMillis() < backgroundPauseUntil;
+    }
+
+    public long remainingBackgroundPauseSeconds() {
+        long remaining = backgroundPauseUntil - System.currentTimeMillis();
         return remaining <= 0 ? 0 : (remaining + 999) / 1_000;
     }
 

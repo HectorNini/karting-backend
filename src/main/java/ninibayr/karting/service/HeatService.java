@@ -21,7 +21,7 @@ import java.util.Optional;
 public class HeatService {
 
     /** Не обновляем за один тик больше, чем нужно: сайт не любит пачки запросов. */
-    private static final int MAX_SYNCS_PER_RUN = 3;
+    private static final int MAX_SYNCS_PER_RUN = 2;
 
     private final HeatRepository heatRepository;
     private final HeatSyncService heatSyncService;
@@ -29,12 +29,14 @@ public class HeatService {
     private final HeatListParser heatListParser;
     private final HeatPrefetchService heatPrefetchService;
     private final LiveTimingService liveTimingService;
+    private final SiteRequestGate siteRequestGate;
     private final MeterRegistry meterRegistry;
 
     public HeatService(HeatRepository heatRepository, HeatSyncService heatSyncService,
                        HeatReadService heatReadService, HeatListParser heatListParser,
                        HeatPrefetchService heatPrefetchService,
                        LiveTimingService liveTimingService,
+                       SiteRequestGate siteRequestGate,
                        MeterRegistry meterRegistry) {
         this.heatRepository = heatRepository;
         this.heatSyncService = heatSyncService;
@@ -42,6 +44,7 @@ public class HeatService {
         this.heatListParser = heatListParser;
         this.heatPrefetchService = heatPrefetchService;
         this.liveTimingService = liveTimingService;
+        this.siteRequestGate = siteRequestGate;
         this.meterRegistry = meterRegistry;
         // Регистрируем заранее, чтобы в Prometheus были нули, а не «нет данных».
         meterRegistry.counter("karting.heat.cache.requests", "hit", "true");
@@ -116,6 +119,11 @@ public class HeatService {
      * @param night ночной режим (редкий опрос)
      */
     public void updateBackgroundCache(boolean night) {
+        if (siteRequestGate.isBackgroundPaused()) {
+            log.debug("Фоновое обновление пропущено: сайт на паузе ещё {} с",
+                    siteRequestGate.remainingBackgroundPauseSeconds());
+            return;
+        }
         LocalDate today = LocalDate.now();
         LocalDateTime now = LocalDateTime.now();
         // Не синхронизируем повторно заезд чаще, чем раз в 5 минут — иначе
