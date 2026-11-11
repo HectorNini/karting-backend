@@ -210,8 +210,8 @@ class HeatMapperTest {
     }
 
     @Test
-    @DisplayName("toDto: разводит дубли позиций по разрыву")
-    void toDto_shouldResolveDuplicatePositionsUsingGap() {
+    @DisplayName("toDto: сохраняет позиции сайта без пересчёта по разрыву")
+    void toDto_keepsSitePositionsWhenTheyRepeat() {
         HeatEntity heatEntity = new HeatEntity();
         heatEntity.setId(61L);
         heatEntity.setSiteId("132395");
@@ -238,12 +238,12 @@ class HeatMapperTest {
         assertThat(result.getLaps()).hasSize(1);
         assertThat(result.getLaps().get(0).getDetails())
                 .extracting(HeatData.LapDetail::getRacePosition)
-                .containsExactly("P1", "P2");
+                .containsExactly("P1", "P1");
         assertThat(result.getLaps().get(0).getResults())
-                .containsExactly("1:02.416 P1", "1:12.799 P2");
+                .containsExactly("1:02.416 P1", "1:12.799 P1");
         assertThat(result.getDrivers())
                 .extracting(HeatData.DriverInfo::getPosition)
-                .containsExactly("P1", "P2");
+                .containsOnly("P1");
         assertThat(result.getLaps().get(0).getDetails().get(1).getGapToLeader())
                 .isEqualTo("(~3.287)");
     }

@@ -7,9 +7,7 @@ import org.springframework.data.jpa.repository.Lock;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
-import java.time.LocalDate;
-import java.time.LocalDateTime;
-import java.time.LocalTime;
+import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 
@@ -37,24 +35,9 @@ public interface HeatRepository extends JpaRepository<HeatEntity, Long> {
     List<HeatEntity> findMissingStints(Pageable pageable);
 
     /**
-     * Кандидаты для дневного фонового обновления: сегодняшние заезды и всё,
-     * что менялось после cutoff. Вместо findAll() — чтобы не тянуть всю БД.
+     * Какие из переданных заездов уже сохранены локально. Один запрос вместо
+     * N обращений к БД при проверке списка на новые заезды.
      */
-    @Query("""
-            select h from HeatEntity h
-            where h.raceDate = :today or h.lastUpdated > :cutoff
-            """)
-    List<HeatEntity> findDayCandidates(@Param("today") LocalDate today,
-                                       @Param("cutoff") LocalDateTime cutoff);
-
-    /**
-     * Кандидаты для ночного обновления: только заезды, которые ещё могли идти
-     * (сегодня и стартовали не раньше fromTime). В обычную ночь — пусто.
-     */
-    @Query("""
-            select h from HeatEntity h
-            where h.raceDate = :today and h.raceTime >= :fromTime
-            """)
-    List<HeatEntity> findNightCandidates(@Param("today") LocalDate today,
-                                         @Param("fromTime") LocalTime fromTime);
+    @Query("select h.siteId from HeatEntity h where h.siteId in :siteIds")
+    List<String> findExistingSiteIds(@Param("siteIds") Collection<String> siteIds);
 }

@@ -11,26 +11,34 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
 
-import java.time.LocalDate;
-import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 @Service
 @Slf4j
 public class HeatService {
 
-    /** Не обновляем за один тик больше, чем нужно: сайт не любит пачки запросов. */
-    private static final int MAX_SYNCS_PER_RUN = 2;
+    /**
+     * Смотрим только верхушку списка: новые заезды появляются сверху.
+     * Старые дыры в БД не догоняем пачкой — они подтянутся при открытии.
+     */
+    private static final int NEW_HEATS_SCAN_LIMIT = 20;
 
     /**
-     * Фоновое обновление завершённых заездов тратит квоту сайта и мешает
-     * открытию старых заездов. По умолчанию выключено: заезд подтягивается
-     * при открытии, а live-заезд обновляет отдельный сервис.
+     * Фоновая проверка новых заездов. Старые заезды не перечитываем:
+     * это тратит квоту сайта и мешает открытию заездов из приложения.
      */
-    @Value("${karting.polling.background-heat-sync-enabled:false}")
-    private boolean backgroundHeatSyncEnabled;
+    @Value("${karting.polling.new-heats-sync-enabled:true}")
+    private boolean newHeatsSyncEnabled = true;
+
+    /** Сколько новых заездов максимум синхронизировать за один проход. */
+    @Value("${karting.polling.new-heats-per-run:3}")
+    private int newHeatsPerRun = 3;
 
     private final HeatRepository heatRepository;
     private final HeatSyncService heatSyncService;
@@ -118,65 +126,105 @@ public class HeatService {
     }
 
     /**
-     * Фоновое обновление заездов. Вызывается планировщиком, который сам решает,
-     * когда пора: днём каждые 30 секунд, ночью — раз в 10 минут.
+     * Проверяет, появились ли на сайте новые заезды, и синхронизирует только их.
      *
-     * <p>Днём обновляем сегодняшние заезды и всё, что менялось за последние 6 часов.
-     * Ночью — только те, что могли ещё идти (стартовали не позже 2 часов назад),
-     * поэтому в обычную ночь сайт вообще не опрашивается.</p>
+     * <p>Список заездов уже кэшируется парсером, поэтому проверка не дёргает
+     * сайт чаще допустимого. Уже сохранённые заезды не перечитываются: их данные
+     * не меняются, а live-заезд обновляется отдельным сервисом после финиша.</p>
      *
-     * @param night ночной режим (редкий опрос)
+     * <p>За один проход синхронизируется не больше {@code new-heats-per-run}
+     * заездов, чтобы не упираться в лимит сайта. При 429 цикл сразу
+     * останавливается, а общий {@link SiteRequestGate} отправляет фон на паузу.</p>
+     *
+     * @return сколько новых заездов удалось синхронизировать
      */
-    public void updateBackgroundCache(boolean night) {
-        if (!backgroundHeatSyncEnabled) {
-            log.debug("Фоновое обновление заездов отключено настройкой");
-            return;
+    public int syncNewHeats() {
+        if (!newHeatsSyncEnabled || newHeatsPerRun <= 0) {
+            log.debug("Проверка новых заездов отключена настройкой");
+            return 0;
         }
         if (siteRequestGate.isBackgroundPaused()) {
-            log.debug("Фоновое обновление пропущено: сайт на паузе ещё {} с",
+            log.debug("Проверка новых заездов пропущена: сайт на паузе ещё {} с",
                     siteRequestGate.remainingBackgroundPauseSeconds());
-            return;
+            return 0;
         }
-        LocalDate today = LocalDate.now();
-        LocalDateTime now = LocalDateTime.now();
-        // Не синхронизируем повторно заезд чаще, чем раз в 5 минут — иначе
-        // бесконечный цикл «обновили → lastUpdated стал свежим → снова обновили».
-        LocalDateTime minAge = now.minusMinutes(5);
 
-        List<HeatEntity> candidates = night
-                ? heatRepository.findNightCandidates(today, now.minusHours(2).toLocalTime())
-                : heatRepository.findDayCandidates(today, now.minusHours(6));
+        HeatList list;
+        try {
+            list = heatListParser.parseCurrentTrack();
+        } catch (SiteRateLimitedException e) {
+            log.warn("Проверка новых заездов отложена: {}", e.getMessage());
+            return 0;
+        } catch (Exception e) {
+            log.warn("Не удалось проверить новые заезды: {}", e.getMessage());
+            return 0;
+        }
 
-        List<HeatEntity> toUpdate = candidates.stream()
-                .filter(h -> h.getLastUpdated() == null || !h.getLastUpdated().isAfter(minAge))
-                .limit(MAX_SYNCS_PER_RUN)
+        List<HeatList.HeatItem> recent = list.getHeats().stream()
+                .limit(NEW_HEATS_SCAN_LIMIT)
+                .toList();
+        if (recent.isEmpty()) {
+            return 0;
+        }
+
+        List<String> ids = recent.stream()
+                .map(HeatList.HeatItem::getId)
+                .filter(Objects::nonNull)
+                .distinct()
+                .toList();
+        if (ids.isEmpty()) {
+            return 0;
+        }
+
+        Set<String> existing = new HashSet<>(heatRepository.findExistingSiteIds(ids));
+        String liveHeatId = liveTimingService.getLiveHeatId();
+        List<HeatList.HeatItem> missing = recent.stream()
+                .filter(item -> !existing.contains(item.getId()))
+                .filter(item -> liveHeatId == null || !liveHeatId.equals(item.getId()))
                 .toList();
 
-        if (toUpdate.isEmpty()) {
-            log.debug("Фоновое обновление ({}): нечего обновлять", night ? "ночь" : "день");
-            return;
+        if (missing.isEmpty()) {
+            log.debug("Новых заездов для синхронизации нет");
+            return 0;
         }
 
-        log.info("Фоновое обновление ({}): к обновлению {} заездов", night ? "ночь" : "день", toUpdate.size());
+        List<HeatList.HeatItem> toSync = missing.stream()
+                .limit(newHeatsPerRun)
+                .toList();
+        log.info("Новых заездов: {}. Синхронизируем {}: {}",
+                missing.size(), toSync.size(),
+                toSync.stream().map(HeatList.HeatItem::getId).toList());
 
-        for (HeatEntity entity : toUpdate) {
+        int synced = 0;
+        for (HeatList.HeatItem item : toSync) {
+            if (siteRequestGate.isCoolingDown() || siteRequestGate.isBackgroundPaused()) {
+                log.debug("Синхронизация новых заездов остановлена: сайт на cooldown/паузе");
+                break;
+            }
             try {
-                heatSyncService.syncHeat(entity.getSiteId());
+                heatSyncService.syncHeat(item.getId());
+                synced++;
             } catch (SiteRateLimitedException e) {
-                log.warn("Фоновое обновление остановлено: {}", e.getMessage());
+                log.warn("Синхронизация новых заездов остановлена: {}", e.getMessage());
                 break;
             } catch (Exception e) {
-                log.error("Ошибка фонового обновления для {}: {}", entity.getSiteId(), e.getMessage());
+                log.warn("Не удалось синхронизировать новый заезд {}: {}",
+                        item.getId(), e.getMessage());
             }
         }
+        return synced;
     }
 
     public HeatList getHeatList() {
         try {
             HeatList parsed = heatListParser.parseCurrentTrack();
-            // Нельзя менять список, который лежит в кэше парсера: иначе
-            // скрытый live-заезд останется скрытым и после завершения сессии.
-            HeatList result = new HeatList(parsed.getTrackName(), new ArrayList<>(parsed.getHeats()));
+            // Копируем элементы: нельзя менять список, который лежит в кэше
+            // парсера, иначе скрытый live-заезд или флаг synced «залипнут».
+            List<HeatList.HeatItem> items = parsed.getHeats().stream()
+                    .map(HeatList.HeatItem::copy)
+                    .collect(Collectors.toCollection(ArrayList::new));
+            HeatList result = new HeatList(parsed.getTrackName(), items);
+
             String liveHeatId = liveTimingService.getLiveHeatId();
             if (liveHeatId != null) {
                 // Сайт уже показывает текущий заезд в общем списке, но он ещё
@@ -186,9 +234,12 @@ public class HeatService {
                         .toList();
                 if (visible.size() != result.getHeats().size()) {
                     log.debug("Скрываем текущий live-заезд {} из общего списка", liveHeatId);
-                    result.setHeats(visible);
+                    result.setHeats(new ArrayList<>(visible));
                 }
             }
+
+            markSynced(result.getHeats());
+
             // Прогреваем кэш последних заездов в фоне, чтобы открытие было мгновенным.
             heatPrefetchService.prefetchRecentAsync();
             return result;
@@ -198,6 +249,31 @@ public class HeatService {
         } catch (Exception e) {
             log.error("Не удалось получить список заездов", e);
             throw new RuntimeException("Не удалось получить список заездов. Проверьте подключение к сети.", e);
+        }
+    }
+
+    /** Проставляет флаг «есть ли подробные данные в БД» одним запросом. */
+    private void markSynced(List<HeatList.HeatItem> items) {
+        if (items.isEmpty()) {
+            return;
+        }
+        List<String> ids = items.stream()
+                .map(HeatList.HeatItem::getId)
+                .filter(Objects::nonNull)
+                .distinct()
+                .toList();
+        if (ids.isEmpty()) {
+            return;
+        }
+        try {
+            Set<String> existing = new HashSet<>(heatRepository.findExistingSiteIds(ids));
+            for (HeatList.HeatItem item : items) {
+                item.setSynced(existing.contains(item.getId()));
+            }
+        } catch (Exception e) {
+            // Список должен открываться даже при проблемах с БД: лучше показать
+            // заезды без отметки, чем отдать 500 на весь экран.
+            log.warn("Не удалось определить синхронизированные заезды: {}", e.getMessage());
         }
     }
 }

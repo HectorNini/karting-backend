@@ -14,7 +14,7 @@ import java.time.LocalTime;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * Тикает раз в 30 секунд и запускает фоновое обновление только тогда,
+ * Тикает раз в 30 секунд и запускает проверку новых заездов только тогда,
  * когда подошёл интервал: 30 секунд днём и 10 минут ночью (настраивается).
  *
  * <p>Ночью заездов нет, поэтому нет смысла дёргать сайт так же часто, как днём.</p>
@@ -80,9 +80,9 @@ public class HeatSyncScheduler {
         }
         (night ? nightRuns : dayRuns).increment();
         try {
-            heatService.updateBackgroundCache(night);
+            heatService.syncNewHeats();
         } catch (Exception e) {
-            log.error("Фоновое обновление не удалось: {}", e.getMessage(), e);
+            log.error("Проверка новых заездов не удалась: {}", e.getMessage(), e);
         }
     }
 

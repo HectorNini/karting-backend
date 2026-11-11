@@ -23,9 +23,20 @@ public class HeatList {
         private String topResult; // Например: "1. RK (1:14.719)"
         /** Тип события: HEAT (заезд) или RACE (гонка/финал). */
         private String type;
+        /** Есть ли подробные данные заезда в локальной БД. */
+        private boolean synced;
 
         public HeatItem(String id, String name, String date, String time, String topResult) {
             this(id, name, date, time, topResult, "HEAT");
+        }
+
+        public HeatItem(String id, String name, String date, String time, String topResult, String type) {
+            this(id, name, date, time, topResult, type, false);
+        }
+
+        /** Копия для ответа API: кэш парсера не должен мутировать. */
+        public HeatItem copy() {
+            return new HeatItem(id, name, date, time, topResult, type, synced);
         }
     }
 }

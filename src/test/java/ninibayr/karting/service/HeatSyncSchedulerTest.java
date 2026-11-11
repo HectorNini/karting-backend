@@ -37,7 +37,7 @@ class HeatSyncSchedulerTest {
         HeatSyncScheduler scheduler = new HeatSyncScheduler(heatService, schedule(), clock, registry);
 
         scheduler.runIfDue();
-        verify(heatService).updateBackgroundCache(false);
+        verify(heatService).syncNewHeats();
 
         clock.plus(Duration.ofSeconds(29));
         scheduler.runIfDue();
@@ -45,7 +45,7 @@ class HeatSyncSchedulerTest {
 
         clock.plus(Duration.ofSeconds(1));
         scheduler.runIfDue();
-        verify(heatService, times(2)).updateBackgroundCache(false);
+        verify(heatService, times(2)).syncNewHeats();
 
         assertEquals(2.0, registry.get("karting.polling.runs")
                 .tag("mode", "day").counter().count());
@@ -61,7 +61,7 @@ class HeatSyncSchedulerTest {
         HeatSyncScheduler scheduler = new HeatSyncScheduler(heatService, schedule(), clock, registry);
 
         scheduler.runIfDue();
-        verify(heatService).updateBackgroundCache(true);
+        verify(heatService).syncNewHeats();
 
         clock.plus(Duration.ofMinutes(9));
         scheduler.runIfDue();
@@ -69,7 +69,7 @@ class HeatSyncSchedulerTest {
 
         clock.plus(Duration.ofMinutes(1));
         scheduler.runIfDue();
-        verify(heatService, times(2)).updateBackgroundCache(true);
+        verify(heatService, times(2)).syncNewHeats();
 
         assertEquals(2.0, registry.get("karting.polling.runs")
                 .tag("mode", "night").counter().count());
