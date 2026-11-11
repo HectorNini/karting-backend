@@ -91,6 +91,9 @@ public class HeatPrefetchService {
         if (System.currentTimeMillis() < retryAfterAt || siteRequestGate.isBackgroundPaused()) {
             return;
         }
+        if (schedule.prefetchLimit(LocalTime.now()) <= 0) {
+            return;
+        }
         if (!scheduled.isEmpty() || !running.compareAndSet(false, true)) {
             return; // прогрев уже запущен
         }

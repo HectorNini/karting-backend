@@ -7,6 +7,7 @@ import ninibayr.karting.dto.HeatList;
 import ninibayr.karting.entity.HeatEntity;
 import ninibayr.karting.exception.SiteRateLimitedException;
 import ninibayr.karting.repository.HeatRepository;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
 
@@ -22,6 +23,14 @@ public class HeatService {
 
     /** Не обновляем за один тик больше, чем нужно: сайт не любит пачки запросов. */
     private static final int MAX_SYNCS_PER_RUN = 2;
+
+    /**
+     * Фоновое обновление завершённых заездов тратит квоту сайта и мешает
+     * открытию старых заездов. По умолчанию выключено: заезд подтягивается
+     * при открытии, а live-заезд обновляет отдельный сервис.
+     */
+    @Value("${karting.polling.background-heat-sync-enabled:false}")
+    private boolean backgroundHeatSyncEnabled;
 
     private final HeatRepository heatRepository;
     private final HeatSyncService heatSyncService;
@@ -119,6 +128,10 @@ public class HeatService {
      * @param night ночной режим (редкий опрос)
      */
     public void updateBackgroundCache(boolean night) {
+        if (!backgroundHeatSyncEnabled) {
+            log.debug("Фоновое обновление заездов отключено настройкой");
+            return;
+        }
         if (siteRequestGate.isBackgroundPaused()) {
             log.debug("Фоновое обновление пропущено: сайт на паузе ещё {} с",
                     siteRequestGate.remainingBackgroundPauseSeconds());
