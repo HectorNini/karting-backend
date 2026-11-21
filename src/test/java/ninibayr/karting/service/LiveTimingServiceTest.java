@@ -311,8 +311,8 @@ class LiveTimingServiceTest {
 
         LiveHeatUpdate heat = service.getSnapshot(1_001_100L).getHeat();
 
-        // REST пересчитывает таймер на момент запроса: 10 000 + 100 мс.
-        assertThat(heat.getElapsed()).isEqualTo(11_100L);
+        // elapsed — на момент последнего сообщения; ageMs доводит его до запроса.
+        assertThat(heat.getElapsed()).isEqualTo(11_000L);
         assertThat(heat.getPitstopTimeThreshold()).isEqualTo(70_000L);
         assertThat(heat.getPitlaneKarts()).containsExactly(10);
     }
@@ -415,9 +415,12 @@ class LiveTimingServiceTest {
     @DisplayName("live id: текущий заезд скрывается из списка только пока сессия свежая")
     void getLiveHeatId_onlyWhileFresh() {
         long now = System.currentTimeMillis();
+        String fresh = HEAT_WITH_RECEIVED_AT
+                .replace("\"receivedAt\":1000000", "\"receivedAt\":" + (now - 62_000))
+                .replace("\"receivedAt\":1062000", "\"receivedAt\":" + now);
 
-        service.handleUpdate(service.parseFromJson(HEAT_WITH_RECEIVED_AT), now - 1_000);
-        service.handleUpdate(service.parseFromJson(HEAT_WITH_RECEIVED_AT), now);
+        service.handleUpdate(service.parseFromJson(fresh), now - 1_000);
+        service.handleUpdate(service.parseFromJson(fresh), now);
 
         assertThat(service.getLiveHeatId()).isEqualTo("900");
 
@@ -448,5 +451,63 @@ class LiveTimingServiceTest {
         assertThat(live.isLive()).isTrue();
         assertThat(live.getHeat().getElapsed()).isEqualTo(170_000L);
         assertThat(live.getStartedAt()).isEqualTo(940_000L);
+    }
+
+    @Test
+    @DisplayName("live: REST не прибавляет возраст сообщения к elapsed второй раз")
+    void snapshot_doesNotDoubleCountAge() {
+        service.handleUpdate(service.parseFromJson(HEAT_WITH_RECEIVED_AT), 1_100_000L);
+        service.handleUpdate(service.parseFromJson(HEAT_WITH_RECEIVED_AT), 1_110_000L);
+
+        LiveSnapshot later = service.getSnapshot(1_115_000L);
+
+        assertThat(later.isLive()).isTrue();
+        assertThat(later.getAgeMs()).isEqualTo(5_000L);
+        // 170 000 на момент сообщения + 5 000 age добавит клиент, а не бэкенд.
+        assertThat(later.getHeat().getElapsed()).isEqualTo(170_000L);
+    }
+
+    @Test
+    @DisplayName("live: свежие сообщения со старыми кругами не раскручивают таймер")
+    void oldLaps_doNotMakeSessionLive() {
+        service.handleUpdate(service.parseFromJson(HEAT_WITH_RECEIVED_AT), 2_000_000L);
+        service.handleUpdate(service.parseFromJson(HEAT_WITH_RECEIVED_AT), 2_005_000L);
+
+        LiveSnapshot snapshot = service.getSnapshot(2_005_000L);
+
+        assertThat(snapshot.isLive()).isFalse();
+        assertThat(snapshot.getStatus()).isEqualTo(LiveTimingService.STATUS_WAITING);
+        // Последний круг 1_062_000 - старт 940_000 = 122_000,
+        // а не время повторного сообщения 2_005_000.
+        assertThat(snapshot.getHeat().getElapsed()).isEqualTo(122_000L);
+    }
+
+    @Test
+    @DisplayName("live: сессия завершается, когда круги перестали приходить")
+    void staleLaps_endLiveSession() {
+        service.handleUpdate(service.parseFromJson(HEAT_WITH_RECEIVED_AT), 1_100_000L);
+        service.handleUpdate(service.parseFromJson(HEAT_WITH_RECEIVED_AT), 1_110_000L);
+        assertThat(service.getSnapshot(1_110_000L).isLive()).isTrue();
+
+        // Сообщение свежее, но последний круг старше stale-таймаута.
+        service.handleUpdate(service.parseFromJson(HEAT_WITH_RECEIVED_AT), 1_300_000L);
+
+        LiveSnapshot snapshot = service.getSnapshot(1_300_000L);
+        assertThat(snapshot.isLive()).isFalse();
+        assertThat(snapshot.getHeat().getElapsed()).isEqualTo(122_000L);
+    }
+
+    @Test
+    @DisplayName("stale: checkStaleness фиксирует время на последнем круге")
+    void checkStaleness_freezesElapsedAtLastLap() {
+        service.handleUpdate(service.parseFromJson(HEAT_WITH_RECEIVED_AT), 1_100_000L);
+        service.handleUpdate(service.parseFromJson(HEAT_WITH_RECEIVED_AT), 1_110_000L);
+
+        long staleAt = 1_110_000L + STALE_MS + 1;
+        service.checkStaleness(staleAt);
+
+        LiveSnapshot snapshot = service.getSnapshot(staleAt);
+        assertThat(snapshot.isLive()).isFalse();
+        assertThat(snapshot.getHeat().getElapsed()).isEqualTo(122_000L);
     }
 }

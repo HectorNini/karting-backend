@@ -17,6 +17,7 @@ public class LiveHeatUpdate {
     private String heatId;
     private String heatName;
     private String trackSlug;
+    /** Время на момент последнего live-сообщения; клиент добавляет ageMs. */
     private Long elapsed;
     private Integer mode;
     private List<Integer> pitlaneKarts;
