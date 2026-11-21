@@ -5,6 +5,7 @@ import lombok.extern.slf4j.Slf4j;
 import ninibayr.karting.dto.HeatData;
 import ninibayr.karting.dto.HeatList;
 import ninibayr.karting.entity.HeatEntity;
+import ninibayr.karting.exception.InvalidHeatIdException;
 import ninibayr.karting.exception.SiteRateLimitedException;
 import ninibayr.karting.repository.HeatRepository;
 import org.springframework.beans.factory.annotation.Value;
@@ -76,6 +77,9 @@ public class HeatService {
      * поэтому сетевой запрос к сайту не держит соединение с БД.</p>
      */
     public HeatData getHeatData(String heatSiteId) {
+        if (heatSiteId == null || !heatSiteId.matches("\\d+")) {
+            throw new InvalidHeatIdException(heatSiteId);
+        }
         Optional<HeatReadService.CachedHeat> cached = heatReadService.findCached(heatSiteId);
         if (cached.isPresent()) {
             meterRegistry.counter("karting.heat.cache.requests", "hit", "true").increment();

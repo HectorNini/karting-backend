@@ -30,8 +30,11 @@ docker compose up --build -d
 ```bash
 curl http://localhost:8080/api/heats
 curl http://localhost:8080/api/live/current
-curl http://localhost:8080/api/live/status
 ```
+
+Мутирующие и диагностические эндпоинты по умолчанию не регистрируются;
+для локальной отладки их можно включить переменной
+`KARTING_ADMIN_ENDPOINTS_ENABLED=true`.
 
 В PowerShell 5.1 `curl` — это алиас `Invoke-WebRequest`; для команд с `-X`
 используйте `curl.exe` (или `Invoke-RestMethod`).
@@ -55,6 +58,7 @@ curl http://localhost:8080/api/live/status
 | `KARTING_POLLING_NIGHT_START` / `KARTING_POLLING_NIGHT_END` | `23:00` / `08:00` | ночное окно (может пересекать полночь) |
 | `KARTING_POLLING_DAY_PREFETCH_LIMIT` / `KARTING_POLLING_NIGHT_PREFETCH_LIMIT` | `0` / `0` | фоновый прогрев отключён |
 | `KARTING_POLLING_NIGHT_RECONNECT_DELAY` | `10m` | минимальная пауза переподключения live-WS ночью |
+| `KARTING_ADMIN_ENDPOINTS_ENABLED` | `false` | регистрировать мутирующие/диагностические эндпоинты (только для локальной отладки) |
 | `DB_HOST` / `DB_PORT` | `postgres` / `5432` | адрес PostgreSQL внутри docker-сети (без Docker — `localhost` / `5433`) |
 | `POSTGRES_DB` / `POSTGRES_USER` / `POSTGRES_PASSWORD` | — | доступ к БД (значения — в `.env.example`) |
 | `GRAFANA_ADMIN_USER` / `GRAFANA_ADMIN_PASSWORD` | `admin` / `admin` | вход в Grafana |
@@ -97,9 +101,18 @@ docker compose --profile observability up -d
 | Метод | Путь | Описание |
 |-------|------|----------|
 | `GET` | `/api/heats` | список последних заездов (до 200) |
-| `GET` | `/api/heat/{id}` | заезд с кругами (из БД или с сайта) |
-| `POST` | `/api/heats/resync?limit=N` | перечитать заезды без стинтов (по умолчанию 20, максимум 200) |
+| `GET` | `/api/heat/{id}` | заезд с кругами (из БД или с сайта); `id` — только цифры, иначе `400` |
 | `GET` | `/api/live/current` | идёт ли гонка сейчас + последний снимок |
+
+Если сайт тайминга отвечает `429`, публичный API возвращает `503` с заголовком
+`Retry-After` (в секундах) — stale-кэш в этом случае не подменяет ошибку.
+
+Следующие эндпоинты регистрируются только при
+`KARTING_ADMIN_ENDPOINTS_ENABLED=true`:
+
+| Метод | Путь | Описание |
+|-------|------|----------|
+| `POST` | `/api/heats/resync?limit=N` | перечитать заезды без стинтов (по умолчанию 20, максимум 200) |
 | `GET` | `/api/live/status` | диагностика live-подключения |
 | `POST` | `/api/live/stop` | принудительно завершить live-сессию |
 | `POST` | `/api/live/push` | подать сообщение live-тайминга вручную (симуляция) |

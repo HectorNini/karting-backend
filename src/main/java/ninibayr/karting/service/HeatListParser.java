@@ -92,15 +92,9 @@ public class HeatListParser {
                 cachedAt = System.currentTimeMillis();
                 return fresh;
             } catch (SiteRateLimitedException e) {
-                if (cached != null) {
-                    long staleAgeSeconds = (System.currentTimeMillis() - cachedAt) / 1000;
-                    // Продлеваем жизнь старого кэша, чтобы каждый следующий запрос
-                    // не пытался снова долбить сайт во время rate limit.
-                    cachedAt = System.currentTimeMillis();
-                    log.warn("Список заездов: сайт ограничил запросы, отдаём кэш {} с: {}",
-                            staleAgeSeconds, e.getMessage());
-                    return cached;
-                }
+                // 429 должен быть виден клиенту как 503 + Retry-After.
+                // Повторные запросы не долбят сайт, пока держится cooldown в SiteRequestGate.
+                log.warn("Список заездов: сайт ограничил запросы: {}", e.getMessage());
                 throw e;
             } catch (Exception e) {
                 if (cached != null) {

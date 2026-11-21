@@ -13,6 +13,7 @@ import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalTime;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -53,11 +54,14 @@ public class HeatPrefetchService {
         return t;
     });
 
-    /** Уже поставленные в очередь / обработанные id, чтобы не дублировать работу. */
-    private final Set<String> scheduled = ConcurrentHashMap.newKeySet();
+    /** Разовые «прогревы» конкретных заездов, чтобы не дублировать работу. */
+    private final Set<String> prefetchInFlight = ConcurrentHashMap.newKeySet();
 
-    /** Заезды, которые сейчас принудительно перечитываются (без проверки кэша). */
+    /** Принудительные пересинхронизации старых заездов. */
     private final Set<String> resyncing = ConcurrentHashMap.newKeySet();
+
+    /** Финиши live-заездов — отдельный флаг, чтобы не блокироваться пересинхронизацией. */
+    private final Set<String> finishing = ConcurrentHashMap.newKeySet();
 
     private final AtomicBoolean running = new AtomicBoolean(false);
 
@@ -79,7 +83,7 @@ public class HeatPrefetchService {
                         ex -> ex.getQueue().size())
                 .description("Сколько заездов ждёт в очереди фонового прогрева")
                 .register(meterRegistry);
-        Gauge.builder("karting.prefetch.scheduled", scheduled, Set::size)
+        Gauge.builder("karting.prefetch.scheduled", prefetchInFlight, Set::size)
                 .description("Сколько заездов уже поставлено на прогрев")
                 .register(meterRegistry);
     }
@@ -110,7 +114,7 @@ public class HeatPrefetchService {
         if (schedule.prefetchLimit(LocalTime.now()) <= 0) {
             return;
         }
-        if (!scheduled.isEmpty() || !running.compareAndSet(false, true)) {
+        if (!running.compareAndSet(false, true)) {
             return; // прогрев уже запущен
         }
         executor.submit(() -> {
@@ -123,6 +127,8 @@ public class HeatPrefetchService {
     }
 
     private void prefetchRecent() {
+        // id уникальны только внутри одного прохода.
+        Set<String> seen = new HashSet<>();
         try {
             if (siteRequestGate.isBackgroundPaused()) {
                 log.debug("Фоновый прогрев отложен: сайт на паузе ещё {} с",
@@ -140,7 +146,7 @@ public class HeatPrefetchService {
 
             for (HeatList.HeatItem item : items) {
                 String id = item.getId();
-                if (!scheduled.add(id)) {
+                if (!seen.add(id)) {
                     continue;
                 }
                 if (siteRequestGate.isCoolingDown() || siteRequestGate.isBackgroundPaused()) {
@@ -165,7 +171,6 @@ public class HeatPrefetchService {
             backOff(e.getMessage());
         } catch (Exception e) {
             log.warn("Фоновый прогрев не удался: {}", e.getMessage());
-            scheduled.clear(); // разрешаем повторить позже
         }
     }
 
@@ -174,7 +179,6 @@ public class HeatPrefetchService {
                 siteRequestGate.remainingBackgroundPauseSeconds());
         seconds = Math.max(1, seconds);
         retryAfterAt = System.currentTimeMillis() + seconds * 1_000 + 1_000;
-        scheduled.clear();
         log.warn("Фоновый прогрев остановлен: {}. Повтор через {} с", reason, seconds);
     }
 
@@ -185,11 +189,11 @@ public class HeatPrefetchService {
 
     /** Ставит в очередь конкретный заезд (например, при открытии из списка). */
     public void prefetchOneAsync(String heatSiteId) {
-        if (isCached(heatSiteId) || !scheduled.add(heatSiteId)) {
+        if (isCached(heatSiteId) || !prefetchInFlight.add(heatSiteId)) {
             return;
         }
         if (siteRequestGate.isCoolingDown() || siteRequestGate.isBackgroundPaused()) {
-            scheduled.remove(heatSiteId);
+            prefetchInFlight.remove(heatSiteId);
             log.debug("Прогрев заезда {} отложен: сайт на cooldown/паузе", heatSiteId);
             return;
         }
@@ -201,7 +205,7 @@ public class HeatPrefetchService {
             } catch (Exception e) {
                 log.warn("Прогрев заезда {} не удался: {}", heatSiteId, e.getMessage());
             } finally {
-                scheduled.remove(heatSiteId);
+                prefetchInFlight.remove(heatSiteId);
             }
         });
     }
@@ -242,7 +246,7 @@ public class HeatPrefetchService {
      * Поэтому финиш не потеряется даже при временном ограничении сайта.</p>
      */
     public void finishLiveHeat(String heatId) {
-        if (heatId == null || !resyncing.add(heatId)) {
+        if (heatId == null || !finishing.add(heatId)) {
             return;
         }
         scheduleFinish(heatId, 0);
@@ -262,14 +266,17 @@ public class HeatPrefetchService {
                     // заставит следующий /api/heats увидеть новый заезд.
                     heatListParser.invalidate();
                     heatSyncService.syncHeat(heatId);
-                    resyncing.remove(heatId);
+                    // Пока шла синхронизация, кэш мог наполниться записью с synced=false.
+                    // После успешного обновления деталей его нужно сбросить ещё раз.
+                    heatListParser.invalidate();
+                    finishing.remove(heatId);
                 } catch (SiteRateLimitedException e) {
                     log.warn("Пересинхронизация заезда {} отложена: {}", heatId, e.getMessage());
                     long retryMs = Math.max(sitePauseMs(), e.getRetryAfterSeconds() * 1_000L);
                     scheduleFinish(heatId, retryMs + 1_000);
                 } catch (Exception e) {
                     log.warn("Пересинхронизация заезда {} не удалась: {}", heatId, e.getMessage());
-                    resyncing.remove(heatId);
+                    finishing.remove(heatId);
                 }
             });
         }, Math.max(0, delayMs), TimeUnit.MILLISECONDS);

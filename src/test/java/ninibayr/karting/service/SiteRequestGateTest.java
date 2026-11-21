@@ -35,6 +35,16 @@ class SiteRequestGateTest {
     }
 
     @Test
+    @DisplayName("Retry-After больше maxCooldown не обрезается в ответе клиенту")
+    void rateLimited_shouldReturnFullRetryAfter() {
+        SiteRateLimitedException exception = gate.rateLimited(429, "3600");
+
+        assertThat(exception.getRetryAfterSeconds()).isEqualTo(3600);
+        assertThat(gate.remainingCooldownSeconds()).isLessThanOrEqualTo(600);
+        assertThat(gate.remainingBackgroundPauseSeconds()).isLessThanOrEqualTo(600);
+    }
+
+    @Test
     @DisplayName("429/403/5xx считаются rate limit, остальные HTTP-ошибки — нет")
     void isRateLimitStatus_shouldClassifyStatuses() {
         assertThat(gate.isRateLimitStatus(429)).isTrue();

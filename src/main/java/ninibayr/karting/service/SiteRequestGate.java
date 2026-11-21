@@ -131,18 +131,21 @@ public class SiteRequestGate {
         int failures = consecutiveFailures.incrementAndGet();
         long now = System.currentTimeMillis();
 
-        long delayMs = parseRetryAfterMs(retryAfterHeader);
-        if (delayMs <= 0) {
-            delayMs = backoffMs(failures);
-        }
-        delayMs = Math.min(delayMs, maxCooldownMs);
+        long requestedDelayMs = parseRetryAfterMs(retryAfterHeader);
+        long delayMs = requestedDelayMs > 0 ? requestedDelayMs : backoffMs(failures);
 
-        long until = now + delayMs;
+        // Внутренний cooldown ограничен, чтобы приложение не «залипло» навсегда.
+        // Но клиенту возвращаем то, что реально просил сайт в Retry-After.
+        long cooldownMs = Math.min(delayMs, maxCooldownMs);
+        long until = now + cooldownMs;
         cooldownUntil.accumulateAndGet(until, Math::max);
 
         // Фон не должен занимать первый же слот после окончания cooldown:
         // иначе он снова получит 429 и сайт никогда не «отпустит» IP.
-        long backgroundDelayMs = Math.min(maxCooldownMs, Math.max(delayMs * 5, 300_000L));
+        long backgroundDelayMs = delayMs > Long.MAX_VALUE / 5
+                ? Long.MAX_VALUE
+                : delayMs * 5;
+        backgroundDelayMs = Math.min(maxCooldownMs, Math.max(backgroundDelayMs, 300_000L));
         backgroundPauseUntil = Math.max(backgroundPauseUntil, now + backgroundDelayMs);
 
         rateLimitedCounter.increment();
@@ -222,7 +225,13 @@ public class SiteRequestGate {
         }
         String text = value.trim();
         try {
-            return Math.max(0, Long.parseLong(text) * 1_000L);
+            long seconds = Long.parseLong(text);
+            if (seconds <= 0) {
+                return 0;
+            }
+            return seconds > Long.MAX_VALUE / 1_000L
+                    ? Long.MAX_VALUE
+                    : seconds * 1_000L;
         } catch (NumberFormatException ignored) {
             // Может быть HTTP-дата.
         }
