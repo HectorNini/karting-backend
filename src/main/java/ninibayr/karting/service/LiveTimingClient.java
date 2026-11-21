@@ -139,7 +139,8 @@ public class LiveTimingClient {
         }
     }
 
-    private void scheduleReconnect() {
+    /** Пакетно-доступно для тестов reconnect-логики без реальной сети. */
+    void scheduleReconnect() {
         if (shuttingDown) {
             return;
         }
@@ -211,14 +212,66 @@ public class LiveTimingClient {
     // WebSocket listener
     // ------------------------------------------------------------------
 
-    private final class Listener implements WebSocket.Listener {
+    /** Фабрика для тестов: колбэки можно проверять без реального подключения. */
+    WebSocket.Listener newListener(int listenerGeneration) {
+        return new Listener(listenerGeneration);
+    }
 
-        /** Максимальный размер одного сообщения от сайта: 1 МБ. */
-        private static final int MAX_MESSAGE_CHARS = 1_000_000;
+    /**
+     * Разбор и передача одного целого сообщения в сервис. Вынесено из listener,
+     * чтобы можно было проверить обработку битых JSON без WebSocket.
+     */
+    static void processMessage(LiveTimingService service, String message) {
+        try {
+            service.handleRawMessage(message);
+        } catch (Exception e) {
+            log.debug("Live WS: ошибка обработки сообщения: {}", e.getMessage());
+        }
+    }
 
-        private final int listenerGeneration;
+    /**
+     * Накопление фрагментов WebSocket-сообщения. Слишком большие сообщения
+     * отбрасываются до следующего флага {@code last}, чтобы не съесть хвост.
+     */
+    static final class MessageAccumulator {
+
+        static final int MAX_MESSAGE_CHARS = 1_000_000;
+
         private final StringBuilder buffer = new StringBuilder();
         private boolean discarding;
+
+        /** Возвращает целое сообщение, когда пришел последний фрагмент. */
+        String append(CharSequence data, boolean last) {
+            if (discarding) {
+                if (last) {
+                    discarding = false;
+                }
+                return null;
+            }
+            buffer.append(data);
+            if (buffer.length() > MAX_MESSAGE_CHARS) {
+                log.warn("Live WS: сообщение больше {} символов, отбрасываем", MAX_MESSAGE_CHARS);
+                buffer.setLength(0);
+                discarding = !last;
+                return null;
+            }
+            if (last) {
+                String message = buffer.toString();
+                buffer.setLength(0);
+                return message;
+            }
+            return null;
+        }
+
+        boolean isDiscarding() {
+            return discarding;
+        }
+    }
+
+    private final class Listener implements WebSocket.Listener {
+
+        private final int listenerGeneration;
+        private final MessageAccumulator messages = new MessageAccumulator();
 
         private Listener(int listenerGeneration) {
             this.listenerGeneration = listenerGeneration;
@@ -264,27 +317,9 @@ public class LiveTimingClient {
             if (!isCurrent()) {
                 return null;
             }
-            if (discarding) {
-                if (last) {
-                    discarding = false;
-                }
-                return null;
-            }
-            buffer.append(data);
-            if (buffer.length() > MAX_MESSAGE_CHARS) {
-                log.warn("Live WS: сообщение больше {} символов, отбрасываем", MAX_MESSAGE_CHARS);
-                buffer.setLength(0);
-                discarding = !last;
-                return null;
-            }
-            if (last) {
-                String message = buffer.toString();
-                buffer.setLength(0);
-                try {
-                    liveTimingService.handleRawMessage(message);
-                } catch (Exception e) {
-                    log.debug("Live WS: ошибка обработки сообщения: {}", e.getMessage());
-                }
+            String message = messages.append(data, last);
+            if (message != null) {
+                processMessage(liveTimingService, message);
             }
             return null;
         }

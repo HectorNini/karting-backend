@@ -510,4 +510,57 @@ class LiveTimingServiceTest {
         assertThat(snapshot.isLive()).isFalse();
         assertThat(snapshot.getHeat().getElapsed()).isEqualTo(122_000L);
     }
+
+    @Test
+    @DisplayName("live: гонка с elapsed от сайта тоже не удваивает возраст")
+    void raceElapsed_isAgedOnlyOnce() {
+        String race = """
+                {"id":901,"name":"Финал","elapsed":60000,"mode":0,"drivers":[
+                  {"driver":{"id":"1","name":"A"},"number":1,"position":1,
+                   "laps":[{"stintNum":1,"number":1,"time":60000}]}]}
+                """;
+
+        String raceWithoutElapsed = """
+                {"id":901,"name":"Финал","mode":0,"drivers":[
+                  {"driver":{"id":"1","name":"A"},"number":1,"position":1,
+                   "laps":[{"stintNum":1,"number":1,"time":60000}]}]}
+                """;
+
+        service.handleUpdate(service.parseFromJson(race), 1_000_000L);
+        service.handleUpdate(service.parseFromJson(raceWithoutElapsed), 1_010_000L);
+
+        LiveSnapshot snapshot = service.getSnapshot(1_015_000L);
+
+        assertThat(snapshot.isLive()).isTrue();
+        assertThat(snapshot.getHeat().getElapsed()).isEqualTo(70_000L);
+        assertThat(snapshot.getAgeMs()).isEqualTo(5_000L);
+    }
+
+    @Test
+    @DisplayName("stale: ровно на границе таймаута сессия ещё жива")
+    void staleBoundary_exactlyAtTimeoutStillLive() {
+        service.handleUpdate(service.parseFromJson(HEAT_WITH_RECEIVED_AT), 1_100_000L);
+        service.handleUpdate(service.parseFromJson(HEAT_WITH_RECEIVED_AT), 1_110_000L);
+
+        LiveSnapshot atBoundary = service.getSnapshot(1_110_000L + STALE_MS);
+
+        assertThat(atBoundary.isLive()).isTrue();
+        assertThat(atBoundary.getStatus()).isEqualTo(LiveTimingService.STATUS_LIVE);
+        assertThat(atBoundary.getHeat().getElapsed()).isEqualTo(170_000L);
+    }
+
+    @Test
+    @DisplayName("stop: ручная остановка даёт FINISHED и фиксирует время")
+    void manualStop_marksSessionFinished() {
+        service.handleUpdate(service.parseFromJson(HEAT_WITH_RECEIVED_AT), 1_100_000L);
+        service.handleUpdate(service.parseFromJson(HEAT_WITH_RECEIVED_AT), 1_110_000L);
+        assertThat(service.getSnapshot(1_110_000L).isLive()).isTrue();
+
+        assertThat(service.stopLive()).isTrue();
+
+        LiveSnapshot stopped = service.getSnapshot(1_110_000L);
+        assertThat(stopped.isLive()).isFalse();
+        assertThat(stopped.getStatus()).isEqualTo(LiveTimingService.STATUS_FINISHED);
+        assertThat(stopped.getHeat().getElapsed()).isEqualTo(122_000L);
+    }
 }
