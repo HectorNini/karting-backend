@@ -2,6 +2,7 @@ package ninibayr.karting.repository;
 import ninibayr.karting.entity.HeatEntity;
 import jakarta.persistence.LockModeType;
 import org.springframework.data.domain.Pageable;
+import org.springframework.data.jpa.repository.EntityGraph;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Lock;
 import org.springframework.data.jpa.repository.Query;
@@ -13,6 +14,30 @@ import java.util.Optional;
 
 public interface HeatRepository extends JpaRepository<HeatEntity, Long> {
     Optional<HeatEntity> findBySiteId(String siteId);
+
+    /** Круги и их гонщики одним запросом (одна коллекция- bag). */
+    @EntityGraph(attributePaths = {"laps", "laps.driver"})
+    @Query("select h from HeatEntity h where h.siteId = :siteId")
+    Optional<HeatEntity> findWithLapsBySiteId(@Param("siteId") String siteId);
+
+    /** Стинты и их гонщики одним запросом (одна коллекция- bag). */
+    @EntityGraph(attributePaths = {"stints", "stints.driver"})
+    @Query("select h from HeatEntity h where h.siteId = :siteId")
+    Optional<HeatEntity> findWithStintsBySiteId(@Param("siteId") String siteId);
+
+    /**
+     * Чтение для DTO. Два запроса вместо N+1: {@code laps} и {@code stints}
+     * — две bag-коллекции, и Hibernate не даёт вычитать их одним join-запросом
+     * (MultipleBagFetchException). Второй запрос попадает в тот же persistence
+     * context и доинициализирует стинты у уже загруженного заезда.
+     */
+    default Optional<HeatEntity> findWithDetailsBySiteId(String siteId) {
+        return findWithLapsBySiteId(siteId)
+                .map(heat -> {
+                    findWithStintsBySiteId(siteId);
+                    return heat;
+                });
+    }
 
     /**
      * То же, но с блокировкой строки на время транзакции: сериализует

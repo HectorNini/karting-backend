@@ -28,7 +28,7 @@ public class HeatReadService {
 
     @Transactional(readOnly = true)
     public Optional<CachedHeat> findCached(String heatSiteId) {
-        return heatRepository.findBySiteId(heatSiteId)
+        return heatRepository.findWithDetailsBySiteId(heatSiteId)
                 .map(heat -> new CachedHeat(
                         heatMapper.toDto(heat),
                         heat.getStints().isEmpty() && !heat.getLaps().isEmpty()));

@@ -248,6 +248,70 @@ class HeatMapperTest {
                 .isEqualTo("(~3.287)");
     }
 
+    @Test
+    @DisplayName("toDto: группирует круги/стинты и сохраняет порядок колонок, кругов и стинтов")
+    void toDto_shouldGroupUnsortedLapsAndStints() {
+        HeatEntity heatEntity = new HeatEntity();
+        heatEntity.setName("Heat 60");
+
+        DriverEntity first = new DriverEntity();
+        first.setId(1L);
+        first.setSiteId("10");
+        first.setName("First");
+
+        DriverEntity second = new DriverEntity();
+        second.setId(2L);
+        second.setSiteId("20");
+        second.setName("Second");
+
+        // Нарочно перемешанный порядок: колонка 1 раньше колонки 0, 2-й круг раньше 1-го.
+        heatEntity.setLaps(List.of(
+                lap(1, 1, 20, second, "1:01.000", "P1", null, null),
+                lap(2, 0, 10, first, "1:03.000", "P1", null, null),
+                lap(1, 0, 10, first, "1:02.000", "P2", null, null),
+                lap(2, 1, 20, second, "1:04.000", "P2", null, null)));
+
+        heatEntity.setStints(List.of(
+                stint(first, 2, 2, 2),
+                stint(second, 1, 1, 2),
+                stint(first, 1, 1, 1)));
+
+        HeatData result = heatMapper.toDto(heatEntity);
+
+        assertThat(result.getDrivers()).extracting(HeatData.DriverInfo::getSiteId)
+                .containsExactly("10", "20");
+        assertThat(result.getDrivers()).extracting(HeatData.DriverInfo::getPosition)
+                .containsExactly("P1", "P2");
+        assertThat(result.getLaps()).extracting(HeatData.LapRow::getLapNumber)
+                .containsExactly("1", "2");
+        assertThat(result.getLaps().get(0).getResults())
+                .containsExactly("1:02.000 P2", "1:01.000 P1");
+        assertThat(result.getLaps().get(1).getResults())
+                .containsExactly("1:03.000 P1", "1:04.000 P2");
+        assertThat(result.getLaps().get(0).getDetails())
+                .extracting(HeatData.LapDetail::getColumnIndex)
+                .containsExactly(0, 1);
+        assertThat(result.getLaps().get(1).getDetails())
+                .extracting(HeatData.LapDetail::getColumnIndex)
+                .containsExactly(0, 1);
+        assertThat(result.getDrivers().get(0).getStints())
+                .extracting(HeatData.StintInfo::getNumber)
+                .containsExactly(1, 2);
+        assertThat(result.getDrivers().get(1).getStints())
+                .extracting(HeatData.StintInfo::getNumber)
+                .containsExactly(1);
+    }
+
+    private static HeatStintEntity stint(DriverEntity driver, int number, int lapFrom, int lapTo) {
+        HeatStintEntity stint = new HeatStintEntity();
+        stint.setDriver(driver);
+        stint.setStintNumber(number);
+        stint.setLapFrom(lapFrom);
+        stint.setLapTo(lapTo);
+        stint.setLapsCount(lapTo - lapFrom + 1);
+        return stint;
+    }
+
     private static LapEntity lap(int raceLap, int column, int kart, DriverEntity driver,
                                  String time, String position, String gap, String interval) {
         LapEntity lap = new LapEntity();

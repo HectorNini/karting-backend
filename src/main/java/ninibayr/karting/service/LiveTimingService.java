@@ -90,7 +90,7 @@ public class LiveTimingService {
         this.objectMapper = objectMapper;
         this.heatPrefetchService = heatPrefetchService;
         this.trackSlug = trackSlug;
-        this.staleTimeoutMs = Math.max(10, staleSeconds) * 1000L;
+        this.staleTimeoutMs = Math.max(1, staleSeconds) * 1000L;
         this.messages = meterRegistry.counter("karting.live.messages");
         this.parseErrors = meterRegistry.counter("karting.live.parse.errors");
         this.sessions = meterRegistry.counter("karting.live.sessions");
@@ -122,6 +122,7 @@ public class LiveTimingService {
         boolean started = false;
         boolean ended = false;
         boolean wasLive;
+        boolean newSessionWithPrevious = false;
         String endedHeatId = null;
         String endedHeatName = null;
 
@@ -135,6 +136,7 @@ public class LiveTimingService {
             String previousHeatName = current != null ? current.getHeatName() : null;
 
             boolean newSession = update.getHeatId() != null && !update.getHeatId().equals(currentHeatId);
+            newSessionWithPrevious = newSession && previousHeatId != null;
             if (newSession) {
                 sessions.increment();
                 currentHeatId = update.getHeatId();
@@ -176,7 +178,8 @@ public class LiveTimingService {
             live = messagesForCurrentHeat >= LIVE_CONFIRM_MESSAGES;
             applyDerivedElapsed(now);
             started = live && !wasLive;
-            ended = !live && wasLive;
+            // Сессия из одного сообщения тоже завершилась, когда пришёл новый id.
+            ended = (!live && wasLive) || newSessionWithPrevious;
             if (ended) {
                 // Новая сессия началась — сохраняем именно предыдущую.
                 endedHeatId = previousHeatId;
@@ -184,7 +187,9 @@ public class LiveTimingService {
             }
         }
 
-        broadcastUpdate(update);
+        // Отдаём в STOMP копию: original ещё может меняться следующим сообщением,
+        // пока Jackson сериализует previous.
+        broadcastUpdate(copyUpdate(update));
 
         if (started) {
             log.info("Live-тайминг: сессия идёт прямо сейчас — {} (id {})",
@@ -208,7 +213,7 @@ public class LiveTimingService {
             if (live && lastMessageAt > 0 && System.currentTimeMillis() - lastMessageAt > staleTimeoutMs) {
                 live = false;
                 applyDerivedElapsed(lastMessageAt);
-                finished = current;
+                finished = copyUpdate(current);
             }
         }
         if (finished != null) {
@@ -222,8 +227,10 @@ public class LiveTimingService {
     /** Принудительно завершить live-сессию (ручное управление/тесты). */
     public boolean stopLive() {
         boolean changed;
+        String heatId;
         synchronized (lock) {
             changed = live;
+            heatId = currentHeatId;
             live = false;
             if (changed) {
                 applyDerivedElapsed(lastMessageAt > 0 ? lastMessageAt : System.currentTimeMillis());
@@ -233,6 +240,7 @@ public class LiveTimingService {
         if (changed) {
             log.info("Live-тайминг: остановлен вручную");
             broadcastStatus();
+            persistHeat(heatId);
         }
         return changed;
     }
@@ -503,14 +511,20 @@ public class LiveTimingService {
     LiveSnapshot getSnapshot(long now) {
         LiveSnapshot snapshot = new LiveSnapshot();
         synchronized (lock) {
-            // Дозаполняем карты кругам по истории стинтов (сайт присылает их без kartNum).
-            fillLapKarts(current);
             long age = lastMessageAt == 0 ? -1 : Math.max(0, now - lastMessageAt);
             boolean stillFresh = lastMessageAt > 0 && age <= staleTimeoutMs;
             boolean isLive = live && stillFresh;
 
+            // REST должен показывать идущий таймер, а не значение на момент
+            // последнего WebSocket-сообщения.
+            if (isLive) {
+                applyDerivedElapsed(now);
+            }
+            // Дозаполняем карты кругам по истории стинтов (сайт присылает их без kartNum).
+            fillLapKarts(current);
+
             snapshot.setLive(isLive);
-            snapshot.setHeat(current);
+            snapshot.setHeat(copyUpdate(current));
             snapshot.setLastUpdateAt(lastMessageAt == 0 ? null : lastMessageAt);
             snapshot.setAgeMs(age < 0 ? null : age);
             snapshot.setStartedAt(startedAt == 0 ? null : startedAt);
@@ -564,6 +578,86 @@ public class LiveTimingService {
         } catch (Exception e) {
             log.debug("Не удалось разослать статус live: {}", e.getMessage());
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Deep-copy снимков
+    // ------------------------------------------------------------------
+
+    /**
+     * Полная копия снимка: Jackson может сериализовать его в другом потоке,
+     * пока основной поток продолжает накапливать дельты.
+     */
+    private static LiveHeatUpdate copyUpdate(LiveHeatUpdate source) {
+        if (source == null) {
+            return null;
+        }
+        LiveHeatUpdate copy = new LiveHeatUpdate();
+        copy.setHeatId(source.getHeatId());
+        copy.setHeatName(source.getHeatName());
+        copy.setTrackSlug(source.getTrackSlug());
+        copy.setElapsed(source.getElapsed());
+        copy.setMode(source.getMode());
+        copy.setPitstopTimeThreshold(source.getPitstopTimeThreshold());
+        if (source.getPitlaneKarts() != null) {
+            copy.setPitlaneKarts(new ArrayList<>(source.getPitlaneKarts()));
+        }
+        if (source.getDrivers() != null) {
+            List<LiveHeatUpdate.LiveDriver> drivers = new ArrayList<>(source.getDrivers().size());
+            for (LiveHeatUpdate.LiveDriver driver : source.getDrivers()) {
+                drivers.add(copyDriver(driver));
+            }
+            copy.setDrivers(drivers);
+        }
+        return copy;
+    }
+
+    private static LiveHeatUpdate.LiveDriver copyDriver(LiveHeatUpdate.LiveDriver source) {
+        if (source == null) {
+            return null;
+        }
+        LiveHeatUpdate.LiveDriver copy = new LiveHeatUpdate.LiveDriver();
+        copy.setDriverId(source.getDriverId());
+        copy.setDriverName(source.getDriverName());
+        copy.setNumber(source.getNumber());
+        copy.setPosition(source.getPosition());
+        copy.setBestTime(source.getBestTime());
+        copy.setTotalLaps(source.getTotalLaps());
+        copy.setLastLapNumber(source.getLastLapNumber());
+        copy.setBestLapTime(source.getBestLapTime());
+        copy.setLastLapTime(source.getLastLapTime());
+        copy.setLastGapTime(source.getLastGapTime());
+
+        LiveHeatUpdate.Stint stint = source.getStint();
+        if (stint != null) {
+            LiveHeatUpdate.Stint stintCopy = new LiveHeatUpdate.Stint();
+            stintCopy.setKart(stint.getKart());
+            stintCopy.setNumber(stint.getNumber());
+            stintCopy.setBestTime(stint.getBestTime());
+            stintCopy.setLength(stint.getLength());
+            stintCopy.setAvgTime(stint.getAvgTime());
+            copy.setStint(stintCopy);
+        }
+
+        if (source.getLaps() != null) {
+            List<LiveHeatUpdate.LiveLap> laps = new ArrayList<>(source.getLaps().size());
+            for (LiveHeatUpdate.LiveLap lap : source.getLaps()) {
+                if (lap == null) {
+                    laps.add(null);
+                    continue;
+                }
+                LiveHeatUpdate.LiveLap lapCopy = new LiveHeatUpdate.LiveLap();
+                lapCopy.setStintNum(lap.getStintNum());
+                lapCopy.setNumber(lap.getNumber());
+                lapCopy.setTime(lap.getTime());
+                lapCopy.setGapTime(lap.getGapTime());
+                lapCopy.setKartNum(lap.getKartNum());
+                lapCopy.setReceivedAt(lap.getReceivedAt());
+                laps.add(lapCopy);
+            }
+            copy.setLaps(laps);
+        }
+        return copy;
     }
 
     // ------------------------------------------------------------------

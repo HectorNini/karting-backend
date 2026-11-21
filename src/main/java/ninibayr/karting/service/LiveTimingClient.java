@@ -66,6 +66,8 @@ public class LiveTimingClient {
 
     private volatile WebSocket socket;
     private volatile boolean connected;
+    /** Увеличивается при каждом новом подключении: старые колбэки игнорируются. */
+    private volatile int generation;
     private volatile int attempt;
     private volatile String lastError;
     private volatile long connectedAt;
@@ -105,15 +107,21 @@ public class LiveTimingClient {
         if (!connecting.compareAndSet(false, true)) {
             return;
         }
+        // Сначала invalidation старых колбэков, затем закрытие старого сокета:
+        // его onClose не должен запланировать лишнее переподключение.
+        int connectionGeneration = ++generation;
         closeSocket();
         try {
             log.debug("Live WS: попытка подключения {} к {}", attempt + 1, wsUrl);
             httpClient.newWebSocketBuilder()
                     .header("Origin", origin)
                     .connectTimeout(Duration.ofSeconds(20))
-                    .buildAsync(URI.create(wsUrl), new Listener())
+                    .buildAsync(URI.create(wsUrl), new Listener(connectionGeneration))
                     .whenComplete((ws, error) -> {
                         connecting.set(false);
+                        if (connectionGeneration != generation) {
+                            return;
+                        }
                         if (error != null) {
                             lastError = rootMessage(error);
                             log.warn("Live WS: не удалось подключиться: {}", lastError);
@@ -122,6 +130,9 @@ public class LiveTimingClient {
                     });
         } catch (Exception e) {
             connecting.set(false);
+            if (connectionGeneration != generation) {
+                return;
+            }
             lastError = rootMessage(e);
             log.warn("Live WS: ошибка подключения: {}", lastError);
             scheduleReconnect();
@@ -202,10 +213,27 @@ public class LiveTimingClient {
 
     private final class Listener implements WebSocket.Listener {
 
+        /** Максимальный размер одного сообщения от сайта: 1 МБ. */
+        private static final int MAX_MESSAGE_CHARS = 1_000_000;
+
+        private final int listenerGeneration;
         private final StringBuilder buffer = new StringBuilder();
+        private boolean discarding;
+
+        private Listener(int listenerGeneration) {
+            this.listenerGeneration = listenerGeneration;
+        }
+
+        private boolean isCurrent() {
+            return listenerGeneration == generation;
+        }
 
         @Override
         public void onOpen(WebSocket webSocket) {
+            if (!isCurrent()) {
+                webSocket.abort();
+                return;
+            }
             socket = webSocket;
             connected = true;
             attempt = 0;
@@ -215,17 +243,40 @@ public class LiveTimingClient {
 
             String listen = "listen track:" + trackSlug;
             try {
-                webSocket.sendText(listen, true);
+                webSocket.sendText(listen, true).whenComplete((unused, error) -> {
+                    if (error != null && isCurrent()) {
+                        log.warn("Live WS: не удалось отправить подписку: {}", rootMessage(error));
+                        closeSocket();
+                        scheduleReconnect();
+                    }
+                });
                 log.info("Live WS: отправлено \"{}\"", listen);
             } catch (Exception e) {
-                log.warn("Live WS: не удалось отправить подписку: {}", e.getMessage());
+                log.warn("Live WS: не удалось отправить подписку: {}", rootMessage(e));
+                closeSocket();
+                scheduleReconnect();
             }
             webSocket.request(Long.MAX_VALUE);
         }
 
         @Override
         public CompletionStage<?> onText(WebSocket webSocket, CharSequence data, boolean last) {
+            if (!isCurrent()) {
+                return null;
+            }
+            if (discarding) {
+                if (last) {
+                    discarding = false;
+                }
+                return null;
+            }
             buffer.append(data);
+            if (buffer.length() > MAX_MESSAGE_CHARS) {
+                log.warn("Live WS: сообщение больше {} символов, отбрасываем", MAX_MESSAGE_CHARS);
+                buffer.setLength(0);
+                discarding = !last;
+                return null;
+            }
             if (last) {
                 String message = buffer.toString();
                 buffer.setLength(0);
@@ -240,8 +291,13 @@ public class LiveTimingClient {
 
         @Override
         public CompletionStage<?> onClose(WebSocket webSocket, int statusCode, String reason) {
+            if (!isCurrent()) {
+                return null;
+            }
             connected = false;
-            socket = null;
+            if (socket == webSocket) {
+                socket = null;
+            }
             log.warn("Live WS: соединение закрыто ({} {})", statusCode, reason);
             scheduleReconnect();
             return null;
@@ -249,8 +305,13 @@ public class LiveTimingClient {
 
         @Override
         public void onError(WebSocket webSocket, Throwable error) {
+            if (!isCurrent()) {
+                return;
+            }
             connected = false;
-            socket = null;
+            if (socket == webSocket) {
+                socket = null;
+            }
             lastError = rootMessage(error);
             log.warn("Live WS: ошибка соединения: {}", lastError);
             scheduleReconnect();
