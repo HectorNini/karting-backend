@@ -5,6 +5,7 @@ import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
@@ -14,10 +15,10 @@ import java.time.LocalTime;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * Тикает раз в 30 секунд и запускает проверку новых заездов только тогда,
- * когда подошёл интервал: 30 секунд днём и 10 минут ночью (настраивается).
- *
- * <p>Ночью заездов нет, поэтому нет смысла дёргать сайт так же часто, как днём.</p>
+ * Страховочный опрос новых заездов. По умолчанию выключен: основной запрос
+ * к сайту делает завершение live-сессии. Если включить, тикает раз в 30 секунд
+ * и запускает проверку только тогда, когда подошёл интервал (10 минут днём,
+ * 30 минут ночью — настраивается).
  */
 @Component
 @Slf4j
@@ -29,6 +30,7 @@ public class HeatSyncScheduler {
     private final HeatService heatService;
     private final SitePollingSchedule schedule;
     private final Clock clock;
+    private final boolean enabled;
     private final Counter dayRuns;
     private final Counter nightRuns;
 
@@ -37,15 +39,22 @@ public class HeatSyncScheduler {
 
     @Autowired
     public HeatSyncScheduler(HeatService heatService, SitePollingSchedule schedule,
-                             MeterRegistry meterRegistry) {
-        this(heatService, schedule, Clock.systemDefaultZone(), meterRegistry);
+                             MeterRegistry meterRegistry,
+                             @Value("${karting.polling.new-heats-sync-enabled:false}") boolean enabled) {
+        this(heatService, schedule, Clock.systemDefaultZone(), meterRegistry, enabled);
     }
 
     HeatSyncScheduler(HeatService heatService, SitePollingSchedule schedule,
                       Clock clock, MeterRegistry meterRegistry) {
+        this(heatService, schedule, clock, meterRegistry, true);
+    }
+
+    HeatSyncScheduler(HeatService heatService, SitePollingSchedule schedule,
+                      Clock clock, MeterRegistry meterRegistry, boolean enabled) {
         this.heatService = heatService;
         this.schedule = schedule;
         this.clock = clock;
+        this.enabled = enabled;
         this.dayRuns = meterRegistry.counter("karting.polling.runs", "mode", "day");
         this.nightRuns = meterRegistry.counter("karting.polling.runs", "mode", "night");
         Gauge.builder("karting.polling.night", this, s -> s.isNightNow() ? 1 : 0)
@@ -62,6 +71,9 @@ public class HeatSyncScheduler {
     }
 
     void runIfDue() {
+        if (!enabled) {
+            return;
+        }
         LocalTime nowTime = LocalTime.now(clock);
         long now = clock.millis();
         long last = lastRunAt.get();

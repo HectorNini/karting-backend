@@ -60,6 +60,17 @@ public class HeatListParser {
         meterRegistry.counter("karting.site.fetch.failures", "kind", "list");
     }
 
+    /**
+     * Сбрасывает кэш списка. Используется после завершения live-заезда:
+     * следующий запрос списка должен увидеть только что закончившийся заезд.
+     */
+    public void invalidate() {
+        synchronized (refreshLock) {
+            cachedList = null;
+            cachedAt = 0;
+        }
+    }
+
     public HeatList parseCurrentTrack() throws Exception {
         HeatList cached = cachedList;
         long now = System.currentTimeMillis();

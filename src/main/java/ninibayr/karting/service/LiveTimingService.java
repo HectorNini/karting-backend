@@ -247,7 +247,7 @@ public class LiveTimingService {
             return;
         }
         try {
-            heatPrefetchService.resyncOneAsync(heatId);
+            heatPrefetchService.finishLiveHeat(heatId);
         } catch (Exception e) {
             log.debug("Не удалось поставить заезд {} на синхронизацию: {}", heatId, e.getMessage());
         }

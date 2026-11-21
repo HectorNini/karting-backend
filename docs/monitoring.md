@@ -88,24 +88,24 @@ Actuator вынесен на отдельный порт `8081` (`management.ser
 ограниченные наборы (`kind`, `result`, `hit`, `mode`). Стандартные метрики добавляют
 `uri`, `status`, `method`, `outcome`, `exception`.
 
-### Ночной режим опроса
+### Периодический опрос и ночной режим
 
-Заезды идут примерно с 09:45 до 22:00, поэтому ночью сайт опрашивается реже:
-интервал меняется с 30 секунд на 10 минут. В обычную ночь фоновое обновление
-не находит кандидатов и вообще не обращается к сайту.
+Основные обращения к сайту теперь инициирует WebSocket при завершении live-сессии.
+Периодический опрос (`HeatSyncScheduler`) по умолчанию выключен
+(`KARTING_POLLING_NEW_HEATS_SYNC_ENABLED=false`) и служит страховкой. Если его
+включить, днём интервал составляет 10 минут, ночью — 30 минут.
 
 * окно по умолчанию — 23:00–08:00, настраивается `KARTING_POLLING_NIGHT_START`
   и `KARTING_POLLING_NIGHT_END`;
 * интервалы — `KARTING_POLLING_DAY_INTERVAL` и `KARTING_POLLING_NIGHT_INTERVAL`;
-* ночью прогреваются только 5 последних заездов вместо 30
-  (`KARTING_POLLING_*_PREFETCH_LIMIT`);
+* фоновый прогрев заездов отключён (`KARTING_POLLING_*_PREFETCH_LIMIT=0`);
 * live-WebSocket ночью переподключается не чаще раза в 10 минут
   (`KARTING_POLLING_NIGHT_RECONNECT_DELAY`).
 
 Проверить режим можно в Prometheus: `karting_polling_night` (1 ночью),
-`karting_polling_interval_seconds` (600 ночью, 30 днём) и
+`karting_polling_interval_seconds` (1800 ночью, 600 днём) и
 `karting_polling_runs_total{mode="night"}`. В логах при смене режима пишется
-строка «Опрос сайта: ночной режим, интервал PT10M».
+строка «Опрос сайта: ночной режим, интервал PT30M».
 
 ## Дашборд
 

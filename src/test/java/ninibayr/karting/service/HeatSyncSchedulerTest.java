@@ -14,6 +14,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 
 class HeatSyncSchedulerTest {
@@ -75,6 +76,22 @@ class HeatSyncSchedulerTest {
                 .tag("mode", "night").counter().count());
         assertEquals(600.0, registry.get("karting.polling.interval.seconds").gauge().value());
         assertEquals(1.0, registry.get("karting.polling.night").gauge().value());
+    }
+
+    @Test
+    void disabledDoesNotPoll() {
+        HeatService heatService = mock(HeatService.class);
+        SimpleMeterRegistry registry = new SimpleMeterRegistry();
+        MutableClock clock = new MutableClock(Instant.parse("2026-10-26T09:00:00Z"), ZONE);
+        HeatSyncScheduler scheduler = new HeatSyncScheduler(heatService, schedule(), clock, registry, false);
+
+        scheduler.runIfDue();
+        clock.plus(Duration.ofHours(1));
+        scheduler.runIfDue();
+
+        verifyNoInteractions(heatService);
+        assertEquals(0.0, registry.get("karting.polling.runs")
+                .tag("mode", "day").counter().count());
     }
 
     /** Часы, которые можно двигать вручную. */

@@ -5,6 +5,7 @@ import org.jsoup.Jsoup;
 import org.jsoup.nodes.Document;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -66,5 +67,18 @@ class HeatListParserTest {
         assertThat(list.getHeats()).hasSize(2);
         assertThat(list.getHeats().get(0).getType()).isEqualTo("HEAT");
         assertThat(list.getHeats().get(1).getType()).isEqualTo("RACE");
+    }
+
+    @Test
+    @DisplayName("invalidate: сброс кэша заставляет следующий запрос идти на сайт")
+    void invalidate_clearsCachedList() {
+        HeatList cached = new HeatList("narvskaya", java.util.List.of());
+        ReflectionTestUtils.setField(parser, "cachedList", cached);
+        ReflectionTestUtils.setField(parser, "cachedAt", System.currentTimeMillis());
+
+        parser.invalidate();
+
+        assertThat(ReflectionTestUtils.getField(parser, "cachedList")).isNull();
+        assertThat((long) ReflectionTestUtils.getField(parser, "cachedAt")).isZero();
     }
 }

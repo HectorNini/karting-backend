@@ -2,6 +2,7 @@ package ninibayr.karting.service;
 
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
+import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
 import ninibayr.karting.dto.HeatList;
 import ninibayr.karting.entity.HeatEntity;
@@ -15,7 +16,9 @@ import java.time.LocalTime;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -39,6 +42,13 @@ public class HeatPrefetchService {
     private final ThreadPoolExecutor executor = new ThreadPoolExecutor(
             1, 1, 0L, TimeUnit.MILLISECONDS, new LinkedBlockingQueue<>(), r -> {
         Thread t = new Thread(r, "heat-prefetch");
+        t.setDaemon(true);
+        return t;
+    });
+
+    /** Отложенные пересинхронизации после завершения live-заезда. */
+    private final ScheduledExecutorService retryExecutor = Executors.newSingleThreadScheduledExecutor(r -> {
+        Thread t = new Thread(r, "heat-resync-retry");
         t.setDaemon(true);
         return t;
     });
@@ -72,6 +82,12 @@ public class HeatPrefetchService {
         Gauge.builder("karting.prefetch.scheduled", scheduled, Set::size)
                 .description("Сколько заездов уже поставлено на прогрев")
                 .register(meterRegistry);
+    }
+
+    @PreDestroy
+    public void shutdown() {
+        executor.shutdownNow();
+        retryExecutor.shutdownNow();
     }
 
     /**
@@ -192,8 +208,8 @@ public class HeatPrefetchService {
 
     /**
      * Принудительно перечитывает заезд с сайта и обновляет его в БД — даже если
-     * он уже в кэше. Нужно после завершения live-гонки и для дозаполнения
-     * стинтов в старых заездах.
+     * он уже в кэше. Используется для дозаполнения стинтов старых заездов.
+     * Для завершившегося live-заезда нужно {@link #finishLiveHeat(String)}.
      */
     public void resyncOneAsync(String heatSiteId) {
         if (heatSiteId == null || !resyncing.add(heatSiteId)) {
@@ -215,6 +231,54 @@ public class HeatPrefetchService {
                 resyncing.remove(heatSiteId);
             }
         });
+    }
+
+    /**
+     * Завершился live-заезд. Это основной триггер обращения к сайту:
+     * сбрасываем кэш списка и один раз перечитываем страницу заезда.
+     *
+     * <p>В отличие от обычного прогрева, запрос не выбрасывается, если сайт
+     * сейчас в cooldown после 429 — он переносится на время окончания паузы.
+     * Поэтому финиш не потеряется даже при временном ограничении сайта.</p>
+     */
+    public void finishLiveHeat(String heatId) {
+        if (heatId == null || !resyncing.add(heatId)) {
+            return;
+        }
+        scheduleFinish(heatId, 0);
+    }
+
+    private void scheduleFinish(String heatId, long delayMs) {
+        retryExecutor.schedule(() -> {
+            long pauseMs = sitePauseMs();
+            if (pauseMs > 0) {
+                log.debug("Пересинхронизация заезда {} перенесена на {} мс", heatId, pauseMs);
+                scheduleFinish(heatId, pauseMs + 1_000);
+                return;
+            }
+            executor.submit(() -> {
+                try {
+                    // Список с сайта мог быть получен до финиша — сброс кэша
+                    // заставит следующий /api/heats увидеть новый заезд.
+                    heatListParser.invalidate();
+                    heatSyncService.syncHeat(heatId);
+                    resyncing.remove(heatId);
+                } catch (SiteRateLimitedException e) {
+                    log.warn("Пересинхронизация заезда {} отложена: {}", heatId, e.getMessage());
+                    long retryMs = Math.max(sitePauseMs(), e.getRetryAfterSeconds() * 1_000L);
+                    scheduleFinish(heatId, retryMs + 1_000);
+                } catch (Exception e) {
+                    log.warn("Пересинхронизация заезда {} не удалась: {}", heatId, e.getMessage());
+                    resyncing.remove(heatId);
+                }
+            });
+        }, Math.max(0, delayMs), TimeUnit.MILLISECONDS);
+    }
+
+    private long sitePauseMs() {
+        return Math.max(
+                siteRequestGate.remainingCooldownSeconds(),
+                siteRequestGate.remainingBackgroundPauseSeconds()) * 1_000L;
     }
 
     /** Подтянутые заезды, чтобы не запрашивать БД повторно. */

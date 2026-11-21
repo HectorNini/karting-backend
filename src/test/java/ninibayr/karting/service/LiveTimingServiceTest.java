@@ -129,8 +129,24 @@ class LiveTimingServiceTest {
         svc.handleUpdate(first, 1_001_000L);
         svc.handleUpdate(second, 1_002_000L);
 
-        org.mockito.Mockito.verify(prefetch).resyncOneAsync("133304");
+        org.mockito.Mockito.verify(prefetch).finishLiveHeat("133304");
         org.mockito.Mockito.verifyNoMoreInteractions(prefetch);
+    }
+
+    @Test
+    @DisplayName("live: тишина после финиша тоже запускает пересинхронизацию заезда")
+    void staleness_persistsFinishedHeat() {
+        HeatPrefetchService prefetch = org.mockito.Mockito.mock(HeatPrefetchService.class);
+        LiveTimingService svc = new LiveTimingService(null, new ObjectMapper(), prefetch, "narvskaya", 180,
+                new io.micrometer.core.instrument.simple.SimpleMeterRegistry());
+        LiveHeatUpdate update = svc.parseFromJson(sampleJson);
+        long now = System.currentTimeMillis();
+
+        svc.handleUpdate(update, now - STALE_MS - 10_000);
+        svc.handleUpdate(update, now - STALE_MS - 5_000);
+        svc.checkStaleness();
+
+        org.mockito.Mockito.verify(prefetch).finishLiveHeat("133304");
     }
 
     @Test

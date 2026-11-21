@@ -20,6 +20,7 @@ import java.util.Optional;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
@@ -132,6 +133,15 @@ class HeatServiceTest {
         assertThat(synced).isZero();
         verify(heatSyncService).syncHeat("200");
         verify(heatSyncService, never()).syncHeat("201");
+    }
+
+    @Test
+    @DisplayName("sync: периодическая проверка выключена — сайт не дёргается")
+    void syncNewHeats_disabledDoesNotTouchSite() throws Exception {
+        ReflectionTestUtils.setField(heatService, "newHeatsSyncEnabled", false);
+
+        assertThat(heatService.syncNewHeats()).isZero();
+        verifyNoInteractions(heatListParser, heatSyncService, siteRequestGate);
     }
 
     @Test
