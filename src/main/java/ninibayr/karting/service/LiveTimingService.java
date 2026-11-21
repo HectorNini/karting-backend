@@ -59,6 +59,8 @@ public class LiveTimingService {
     private volatile String currentHeatId;
     private volatile int messagesForCurrentHeat;
     private volatile long lastMessageAt;
+    /** Когда пришел последний круг текущей сессии (epoch ms). */
+    private volatile long lastLapAt;
     private volatile boolean live;
     private volatile long startedAt;
     private volatile long totalMessages;
@@ -146,6 +148,7 @@ public class LiveTimingService {
                 siteElapsed = null;
                 siteElapsedAt = 0;
                 stintKarts.clear();
+                lastLapAt = 0;
                 log.info("Live-тайминг: новая сессия {} (id {})", update.getHeatName(), update.getHeatId());
             }
 
@@ -167,6 +170,11 @@ public class LiveTimingService {
 
             recordStintKarts(update.getDrivers());
 
+            Long latestLapAt = findLastLapAt(current);
+            if (latestLapAt != null) {
+                lastLapAt = latestLapAt;
+            }
+
             // Сайт для гонок присылает elapsed, а для заездов обычно 0.
             // Запоминаем только осмысленное значение: 0 — это «нет таймера».
             if (update.getElapsed() != null && update.getElapsed() > 0) {
@@ -174,8 +182,12 @@ public class LiveTimingService {
                 siteElapsedAt = now;
             }
 
-            // Одно сообщение — это «последнее состояние» с сервера, а не живая гонка.
-            live = messagesForCurrentHeat >= LIVE_CONFIRM_MESSAGES;
+            // Сайт может прислать последнее сохранённое состояние уже после финиша.
+            // Оно приходит как обычные сообщения, но круги в нём старые — такую
+            // сессию нельзя считать живой, иначе таймер прыгает на десятки минут.
+            boolean hasFreshActivity = (siteElapsed != null && siteElapsed > 0)
+                    || (lastLapAt > 0 && now - lastLapAt <= staleTimeoutMs);
+            live = messagesForCurrentHeat >= LIVE_CONFIRM_MESSAGES && hasFreshActivity;
             applyDerivedElapsed(now);
             started = live && !wasLive;
             // Сессия из одного сообщения тоже завершилась, когда пришёл новый id.
@@ -208,11 +220,20 @@ public class LiveTimingService {
      */
     @Scheduled(fixedDelay = 10000)
     public void checkStaleness() {
+        checkStaleness(System.currentTimeMillis());
+    }
+
+    /** Вынесено отдельно, чтобы тесты могли подставить время. */
+    void checkStaleness(long now) {
         LiveHeatUpdate finished = null;
         synchronized (lock) {
-            if (live && lastMessageAt > 0 && System.currentTimeMillis() - lastMessageAt > staleTimeoutMs) {
+            boolean noMessages = lastMessageAt > 0 && now - lastMessageAt > staleTimeoutMs;
+            // Для заездов сайт не присылает elapsed: свежесть определяем по кругам.
+            boolean lapsAreSource = siteElapsed == null || siteElapsed <= 0;
+            boolean noLaps = lapsAreSource && lastLapAt > 0 && now - lastLapAt > staleTimeoutMs;
+            if (live && (noMessages || noLaps)) {
                 live = false;
-                applyDerivedElapsed(lastMessageAt);
+                applyDerivedElapsed(noMessages ? lastMessageAt : lastLapAt);
                 finished = copyUpdate(current);
             }
         }
@@ -302,7 +323,19 @@ public class LiveTimingService {
         }
 
         if (sessionStart != null) {
-            long end = live ? now : (lastLapAt != null ? lastLapAt : now);
+            long end;
+            if (live) {
+                // Таймер может идти только до последнего круга + stale-таймаут.
+                // Иначе повторно присланное старое состояние раскручивает его
+                // до времени текущего сообщения.
+                long lapLimit = lastLapAt != null
+                        ? (lastLapAt > Long.MAX_VALUE - staleTimeoutMs
+                                ? Long.MAX_VALUE : lastLapAt + staleTimeoutMs)
+                        : now;
+                end = Math.min(now, lapLimit);
+            } else {
+                end = lastLapAt != null ? lastLapAt : now;
+            }
             long elapsed = Math.max(0, end - sessionStart);
             heat.setElapsed(elapsed);
             startedAt = sessionStart;
@@ -515,11 +548,9 @@ public class LiveTimingService {
             boolean stillFresh = lastMessageAt > 0 && age <= staleTimeoutMs;
             boolean isLive = live && stillFresh;
 
-            // REST должен показывать идущий таймер, а не значение на момент
-            // последнего WebSocket-сообщения.
-            if (isLive) {
-                applyDerivedElapsed(now);
-            }
+            // elapsed остаётся на момент последнего сообщения: клиент добавляет
+            // ageMs и свой локальный тик. Повторный расчёт здесь прибавил бы
+            // возраст сообщения второй раз — отсюда и прыжки таймера.
             // Дозаполняем карты кругам по истории стинтов (сайт присылает их без kartNum).
             fillLapKarts(current);
 

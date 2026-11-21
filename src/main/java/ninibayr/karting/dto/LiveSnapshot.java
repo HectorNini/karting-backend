@@ -19,7 +19,7 @@ public class LiveSnapshot {
     private LiveHeatUpdate heat;
     /** Время последнего сообщения от сайта (epoch ms). */
     private Long lastUpdateAt;
-    /** Сколько миллисекунд назад пришло последнее сообщение. */
+    /** Сколько миллисекунд назад пришло последнее сообщение (добавляется к elapsed). */
     private Long ageMs;
     /** Оценка момента старта сессии (epoch ms). */
     private Long startedAt;
