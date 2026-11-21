@@ -1,6 +1,7 @@
 package ninibayr.karting.service;
 
 import ninibayr.karting.dto.HeatList;
+import ninibayr.karting.exception.SiteRateLimitedException;
 import org.jsoup.Jsoup;
 import org.jsoup.nodes.Document;
 import org.junit.jupiter.api.DisplayName;
@@ -8,6 +9,9 @@ import org.junit.jupiter.api.Test;
 import org.springframework.test.util.ReflectionTestUtils;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.mock;
 
 class HeatListParserTest {
 
@@ -67,6 +71,23 @@ class HeatListParserTest {
         assertThat(list.getHeats()).hasSize(2);
         assertThat(list.getHeats().get(0).getType()).isEqualTo("HEAT");
         assertThat(list.getHeats().get(1).getType()).isEqualTo("RACE");
+    }
+
+    @Test
+    @DisplayName("429: даже при наличии кэша отдаём 503 с Retry-After")
+    void parseCurrentTrack_rateLimited_shouldThrowInsteadOfStaleCache() throws Exception {
+        SiteRequestGate gate = mock(SiteRequestGate.class);
+        HeatListParser parserWithGate = new HeatListParser(registry, gate, 0);
+        ReflectionTestUtils.setField(parserWithGate, "cachedList",
+                new HeatList("narvskaya", java.util.List.of()));
+        ReflectionTestUtils.setField(parserWithGate, "cachedAt", System.currentTimeMillis());
+        doThrow(new SiteRateLimitedException("HTTP 429", 60, 429))
+                .when(gate).beforeRequest();
+
+        assertThatThrownBy(parserWithGate::parseCurrentTrack)
+                .isInstanceOf(SiteRateLimitedException.class);
+        assertThat((long) ReflectionTestUtils.getField(parserWithGate, "cachedAt"))
+                .isPositive();
     }
 
     @Test

@@ -3,6 +3,7 @@ package ninibayr.karting.service;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import ninibayr.karting.dto.HeatData;
 import ninibayr.karting.dto.HeatList;
+import ninibayr.karting.exception.InvalidHeatIdException;
 import ninibayr.karting.exception.SiteRateLimitedException;
 import ninibayr.karting.repository.HeatRepository;
 import org.junit.jupiter.api.BeforeEach;
@@ -18,6 +19,7 @@ import java.util.List;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -155,6 +157,14 @@ class HeatServiceTest {
 
         assertThat(result).isSameAs(data);
         verify(heatSyncService, never()).syncHeat("100");
+    }
+
+    @Test
+    @DisplayName("heat: нечисловой id отклоняется до обращения к БД и сайту")
+    void getHeatData_rejectsInvalidId() {
+        assertThatThrownBy(() -> heatService.getHeatData("../admin"))
+                .isInstanceOf(InvalidHeatIdException.class);
+        verifyNoInteractions(heatReadService, heatSyncService, heatPrefetchService);
     }
 
     private static HeatList listWith(String... ids) {

@@ -35,6 +35,19 @@ public class GlobalExceptionHandler {
                 .body(body);
     }
 
+    @ExceptionHandler(InvalidHeatIdException.class)
+    public ResponseEntity<Map<String, Object>> handleInvalidHeatId(InvalidHeatIdException ex) {
+        log.debug("Некорректный id заезда: {}", ex.getMessage());
+
+        Map<String, Object> body = new HashMap<>();
+        body.put("timestamp", LocalDateTime.now().toString());
+        body.put("status", HttpStatus.BAD_REQUEST.value());
+        body.put("error", "Bad Request");
+        body.put("message", ex.getMessage());
+
+        return new ResponseEntity<>(body, HttpStatus.BAD_REQUEST);
+    }
+
     @ExceptionHandler(NoResourceFoundException.class)
     public ResponseEntity<Map<String, Object>> handleNotFound(NoResourceFoundException ex) {
         log.debug("Запрошен несуществующий ресурс: {}", ex.getMessage());
