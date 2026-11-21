@@ -134,6 +134,74 @@ class LiveTimingServiceTest {
     }
 
     @Test
+    @DisplayName("live: смена id после одного сообщения тоже завершает previous")
+    void newHeatId_singleMessage_persistsPreviousHeat() {
+        HeatPrefetchService prefetch = org.mockito.Mockito.mock(HeatPrefetchService.class);
+        LiveTimingService svc = new LiveTimingService(null, new ObjectMapper(), prefetch, "narvskaya", 180,
+                new io.micrometer.core.instrument.simple.SimpleMeterRegistry());
+        LiveHeatUpdate first = svc.parseFromJson(sampleJson);
+        LiveHeatUpdate second = svc.parseFromJson(sampleJson.replace("\"id\":133304", "\"id\":133305"));
+
+        svc.handleUpdate(first, 1_000_000L); // одно сообщение ещё не считается live
+        svc.handleUpdate(second, 1_001_000L);
+
+        org.mockito.Mockito.verify(prefetch).finishLiveHeat("133304");
+    }
+
+    @Test
+    @DisplayName("stop: ручная остановка запускает пересинхронизацию заезда")
+    void stop_persistsHeat() {
+        HeatPrefetchService prefetch = org.mockito.Mockito.mock(HeatPrefetchService.class);
+        LiveTimingService svc = new LiveTimingService(null, new ObjectMapper(), prefetch, "narvskaya", 180,
+                new io.micrometer.core.instrument.simple.SimpleMeterRegistry());
+        LiveHeatUpdate update = svc.parseFromJson(sampleJson);
+
+        svc.handleUpdate(update, 1_000_000L);
+        svc.handleUpdate(update, 1_001_000L);
+        assertThat(svc.stopLive()).isTrue();
+
+        org.mockito.Mockito.verify(prefetch).finishLiveHeat("133304");
+        assertThat(svc.stopLive()).isFalse();
+        org.mockito.Mockito.verifyNoMoreInteractions(prefetch);
+    }
+
+    @Test
+    @DisplayName("snapshot: уже выданный снимок не меняется при новых дельтах")
+    void snapshot_isDeepCopy() {
+        service.handleUpdate(service.parseFromJson(HEAT_777_FULL), 1_000_000L);
+        LiveHeatUpdate issued = service.getSnapshot(1_000_100L).getHeat();
+
+        assertThat(issued.getElapsed()).isEqualTo(10_000L);
+        assertThat(issued.getPitlaneKarts()).containsExactly(10);
+        assertThat(issued.getDrivers().get(0).getDriverName()).isEqualTo("A");
+        assertThat(issued.getDrivers().get(0).getLaps()).hasSize(1);
+
+        service.handleUpdate(service.parseFromJson("""
+                {"id":777,"pitlaneKarts":[],"drivers":[
+                  {"driver":{"id":"1","name":"A2"},"laps":[{"stintNum":1,"number":2,"time":29500}]}
+                ]}
+                """), 1_001_000L);
+
+        // Старый снимок остался неизменным.
+        assertThat(issued.getElapsed()).isEqualTo(10_000L);
+        assertThat(issued.getPitlaneKarts()).containsExactly(10);
+        assertThat(issued.getDrivers().get(0).getDriverName()).isEqualTo("A");
+        assertThat(issued.getDrivers().get(0).getLaps()).hasSize(1);
+        assertThat(issued.getDrivers().get(0).getLaps().get(0).getTime()).isEqualTo(30_000L);
+
+        // Попытка мутировать старый снимок не портит текущее состояние сервиса.
+        issued.getPitlaneKarts().add(99);
+        issued.getDrivers().get(0).setDriverName("MUTATED");
+        issued.getDrivers().get(0).getLaps().get(0).setTime(1L);
+
+        LiveHeatUpdate fresh = service.getSnapshot(1_001_100L).getHeat();
+        assertThat(fresh.getPitlaneKarts()).isEmpty();
+        assertThat(fresh.getDrivers().get(0).getDriverName()).isEqualTo("A2");
+        assertThat(fresh.getDrivers().get(0).getLaps()).hasSize(2);
+        assertThat(fresh.getDrivers().get(0).getLaps().get(0).getTime()).isEqualTo(30_000L);
+    }
+
+    @Test
     @DisplayName("live: тишина после финиша тоже запускает пересинхронизацию заезда")
     void staleness_persistsFinishedHeat() {
         HeatPrefetchService prefetch = org.mockito.Mockito.mock(HeatPrefetchService.class);
@@ -243,8 +311,8 @@ class LiveTimingServiceTest {
 
         LiveHeatUpdate heat = service.getSnapshot(1_001_100L).getHeat();
 
-        // elapsed продолжает идти, даже если сайт не прислал его в дельте.
-        assertThat(heat.getElapsed()).isEqualTo(11_000L);
+        // REST пересчитывает таймер на момент запроса: 10 000 + 100 мс.
+        assertThat(heat.getElapsed()).isEqualTo(11_100L);
         assertThat(heat.getPitstopTimeThreshold()).isEqualTo(70_000L);
         assertThat(heat.getPitlaneKarts()).containsExactly(10);
     }

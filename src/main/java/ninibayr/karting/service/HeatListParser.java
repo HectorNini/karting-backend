@@ -32,6 +32,8 @@ public class HeatListParser {
     private static final int MAX_HEATS = 200;
     /** Защита от бесконечного цикла при обходе страниц пагинации (50 заездов на страницу). */
     private static final int MAX_PAGES = 20;
+    /** 5 МБ более чем достаточно для страницы со списком заездов. */
+    private static final int MAX_BODY_SIZE = 5_000_000;
 
     @Value("${karting.user-agent}")
     private String userAgent;
@@ -129,7 +131,7 @@ public class HeatListParser {
                 Connection.Response response = Jsoup.connect(url)
                         .userAgent(userAgent)
                         .timeout(10000)
-                        .maxBodySize(0)
+                        .maxBodySize(MAX_BODY_SIZE)
                         .ignoreHttpErrors(true)
                         .execute();
                 int status = response.statusCode();

@@ -29,6 +29,10 @@ import java.util.regex.Pattern;
 @Slf4j
 public class HeatParser {
 
+    /** 5 МБ хватает для страницы заезда; 0 отключал лимит и позволял сайту «съесть» память. */
+    private static final int MAX_BODY_SIZE = 5_000_000;
+    private static final Pattern KART_NUMBER = Pattern.compile("(\\d+)");
+
     private final MeterRegistry meterRegistry;
     private final SiteRequestGate siteRequestGate;
 
@@ -49,7 +53,7 @@ public class HeatParser {
             Connection.Response response = Jsoup.connect(url)
                     .userAgent(userAgent)
                     .timeout(10000)
-                    .maxBodySize(0)
+                    .maxBodySize(MAX_BODY_SIZE)
                     .ignoreHttpErrors(true)
                     .execute();
             int status = response.statusCode();
@@ -99,9 +103,6 @@ public class HeatParser {
             data.setRaceDate(racedAt.toLocalDate());
             data.setRaceTime(racedAt.toLocalTime());
         }
-
-        parseWeather(doc, data);
-        parseStartPositions(doc, data);
 
         Elements headerRows = doc.select("table.heat-result thead tr");
         Element driverRow = null;
@@ -340,14 +341,19 @@ public class HeatParser {
             }
         }
 
+        // Один проход по кругам вместо O(гонщики × круги).
+        Map<String, List<ParsedHeatData.ParsedLap>> lapsByDriver = new HashMap<>();
+        for (ParsedHeatData.ParsedLap lap : data.getLaps()) {
+            if (lap.getDriverSiteId() != null) {
+                lapsByDriver.computeIfAbsent(lap.getDriverSiteId(), k -> new ArrayList<>()).add(lap);
+            }
+        }
+
         for (ParsedHeatData.ParsedDriver driver : data.getDrivers()) {
             int column = driver.getColumnIndex();
-            List<ParsedHeatData.ParsedLap> driverLaps = new ArrayList<>();
-            for (ParsedHeatData.ParsedLap lap : data.getLaps()) {
-                if (driver.getSiteId() != null && driver.getSiteId().equals(lap.getDriverSiteId())) {
-                    driverLaps.add(lap);
-                }
-            }
+            List<ParsedHeatData.ParsedLap> driverLaps = driver.getSiteId() == null
+                    ? List.of()
+                    : lapsByDriver.getOrDefault(driver.getSiteId(), List.of());
             if (driverLaps.isEmpty()) {
                 continue;
             }
@@ -500,7 +506,7 @@ public class HeatParser {
         }
         String text = kartEl.text().trim();
         // try to extract number if wrapped
-        java.util.regex.Matcher m = java.util.regex.Pattern.compile("(\\d+)").matcher(text);
+        Matcher m = KART_NUMBER.matcher(text);
         if (m.find()) {
             try {
                 return Integer.parseInt(m.group(1));
@@ -561,26 +567,8 @@ public class HeatParser {
         return byColumn;
     }
 
-    private static void parseWeather(Document doc, ParsedHeatData data) {
-        Elements divs = doc.select("div");
-        for (Element d : divs) {
-            String txt = d.text();
-            if (txt != null && (txt.contains("℃") || txt.contains("°C"))) {
-                // try to extract simple weather string
-                String weather = txt.replaceAll("\\s+", " ").trim();
-                if (!weather.isEmpty()) {
-                    data.setWeather(weather);
-                    break;
-                }
-            }
-        }
-    }
-
-    private static void parseStartPositions(Document doc, ParsedHeatData data) {
-        // already handled in header parsing if found
-    }
-
     private static void parseFooterStats(Document doc, ParsedHeatData data) {
+        Map<Integer, ParsedHeatData.ParsedDriver> byColumn = driversByColumn(data);
         Elements footRows = doc.select("table.heat-result tfoot tr");
         for (Element tr : footRows) {
             Element th = tr.selectFirst("th");
@@ -593,7 +581,6 @@ public class HeatParser {
                 continue;
             }
             // apply to drivers by physical column index
-            Map<Integer, ParsedHeatData.ParsedDriver> byColumn = driversByColumn(data);
             for (int i = 0; i < tds.size(); i++) {
                 ParsedHeatData.ParsedDriver driver = byColumn.get(i);
                 if (driver == null) {
