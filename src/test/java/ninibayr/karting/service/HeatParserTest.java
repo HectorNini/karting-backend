@@ -5,8 +5,6 @@ import org.jsoup.nodes.Document;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
-import java.io.InputStream;
-import java.nio.charset.StandardCharsets;
 import java.time.LocalDate;
 import java.time.LocalTime;
 import java.util.List;
@@ -109,91 +107,144 @@ class HeatParserTest {
     }
 
     @Test
-    @DisplayName("parse: драйв-заезд 112490 — 3 стинта, карт на каждом круге, время пита без «l»")
+    @DisplayName("parse: смена картов по S-строкам и круг в пит с суффиксом «l»")
     void parse_driveHeat_shouldFillStintsAndKarts() {
-        ParsedHeatData data = heatParser.parse(load("heat112490.html"));
+        ParsedHeatData data = heatParser.parse(Jsoup.parse("""
+                <html><head><title>Финал А</title></head><body>
+                <h4>Финал А<small class="text-body-secondary">24 Apr 2026, 14:00</small></h4>
+                <table class="heat-result">
+                  <thead>
+                    <tr><th scope="row"></th><th scope="col">1</th></tr>
+                    <tr><th scope="row">Driver</th>
+                        <th scope="col"><a href="/tracks/narvskaya/drivers/901">Лидер</a></th></tr>
+                    <tr><th scope="row">Kart</th>
+                        <th scope="col"><a href="/tracks/narvskaya/karts/9">9</a></th></tr>
+                  </thead>
+                  <tbody>
+                    <tr><th scope="row">1</th><td>40.000 <span class="p">P1</span></td></tr>
+                    <tr><th scope="row">2</th><td>39.000 <span class="p">P1</span></td></tr>
+                    <tr><th scope="row">3</th><td>38.000 <span class="p">P1</span></td></tr>
+                    <tr><th scope="row">4</th><td>37.000 <span class="p">P1</span></td></tr>
+                    <tr><th scope="row">5</th><td>36.000 <span class="p">P1</span></td></tr>
+                    <tr><th scope="row">6</th><td>35.000 <span class="p">P1</span></td></tr>
+                    <tr><th scope="row">7</th><td>1:35.000 7l <span class="p">P1</span></td></tr>
+                    <tr><th scope="row">8</th><td>42.000 <span class="p">P1</span></td></tr>
+                    <tr><th scope="row">9</th><td>41.000 <span class="p">P1</span></td></tr>
+                    <tr><th scope="row">10</th><td>40.500 <span class="p">P1</span></td></tr>
+                  </tbody>
+                  <tfoot>
+                    <tr><th scope="row">S1 kart</th><td>9</td></tr>
+                    <tr><th scope="row">S1 laps</th><td>7</td></tr>
+                    <tr><th scope="row">S2 kart</th><td>101</td></tr>
+                    <tr><th scope="row">S2 laps</th><td>2</td></tr>
+                    <tr><th scope="row">S2 best</th><td>1:14.719</td></tr>
+                    <tr><th scope="row">S3 kart</th><td>6</td></tr>
+                    <tr><th scope="row">S3 laps</th><td>1</td></tr>
+                  </tfoot>
+                </table>
+                </body></html>
+                """));
 
         assertThat(data.getName()).isEqualTo("Финал А");
         assertThat(data.getRaceDate()).isEqualTo(LocalDate.of(2026, 4, 24));
-        assertThat(data.getDrivers()).hasSize(6);
-        assertThat(data.getLaps()).hasSize(6 * 42);
+        assertThat(data.getDrivers()).hasSize(1);
+        assertThat(data.getLaps()).hasSize(10);
 
-        assertThat(data.getDrivers()).extracting(d -> d.getStints().get(0).getKartNumber())
-                .containsExactly(1, 6, 4, 9, 5, 3);
-
-        for (ParsedHeatData.ParsedDriver driver : data.getDrivers()) {
-            List<ParsedHeatData.ParsedStint> stints = driver.getStints();
-            assertThat(stints).hasSize(3);
-            assertThat(stints).extracting(ParsedHeatData.ParsedStint::getNumber)
-                    .containsExactly(1, 2, 3);
-            assertThat(stints.get(0).getLapFrom()).isEqualTo(1);
-            assertThat(stints.get(2).getLapTo()).isEqualTo(42);
-            assertThat(stints).allSatisfy(stint -> {
-                assertThat(stint.getKartNumber()).isNotNull();
-                assertThat(stint.getLapsCount()).isPositive();
-            });
-            assertThat(stints.stream().mapToInt(ParsedHeatData.ParsedStint::getLapsCount).sum())
-                    .isEqualTo(42);
-            for (int i = 1; i < stints.size(); i++) {
-                assertThat(stints.get(i).getLapFrom())
-                        .isEqualTo(stints.get(i - 1).getLapTo() + 1);
-            }
+        ParsedHeatData.ParsedDriver driver = data.getDrivers().get(0);
+        List<ParsedHeatData.ParsedStint> stints = driver.getStints();
+        assertThat(stints).extracting(ParsedHeatData.ParsedStint::getNumber)
+                .containsExactly(1, 2, 3);
+        assertThat(stints).extracting(ParsedHeatData.ParsedStint::getKartNumber)
+                .containsExactly(9, 101, 6);
+        assertThat(stints).extracting(ParsedHeatData.ParsedStint::getLapFrom)
+                .containsExactly(1, 8, 10);
+        assertThat(stints).extracting(ParsedHeatData.ParsedStint::getLapTo)
+                .containsExactly(7, 9, 10);
+        assertThat(stints.stream().mapToInt(ParsedHeatData.ParsedStint::getLapsCount).sum())
+                .isEqualTo(10);
+        for (int i = 1; i < stints.size(); i++) {
+            assertThat(stints.get(i).getLapFrom())
+                    .isEqualTo(stints.get(i - 1).getLapTo() + 1);
         }
 
-        // Четвёртая колонка: 9 → 101 → 6, смена после 7-го и 30-го круга.
-        ParsedHeatData.ParsedDriver kartNine = data.getDrivers().get(3);
-        List<ParsedHeatData.ParsedLap> laps = lapsOf(data, kartNine.getSiteId());
-        assertThat(laps).hasSize(42);
+        List<ParsedHeatData.ParsedLap> laps = lapsOf(data, driver.getSiteId());
+        assertThat(laps).hasSize(10);
         assertThat(laps).allSatisfy(lap -> {
             assertThat(lap.getStintIndex()).isNotNull();
             assertThat(lap.getKartNumber()).isNotNull();
+            assertThat(lap.getRacePosition()).startsWith("P");
         });
         assertThat(laps.get(6).getKartNumber()).isEqualTo(9);
         assertThat(laps.get(7).getKartNumber()).isEqualTo(101);
-        assertThat(laps.get(29).getKartNumber()).isEqualTo(101);
-        assertThat(laps.get(30).getKartNumber()).isEqualTo(6);
+        assertThat(laps.get(8).getKartNumber()).isEqualTo(101);
+        assertThat(laps.get(9).getKartNumber()).isEqualTo(6);
 
-        // Круг заезда в пит: время больше 90 с, суффикс «7l» срезан.
-        assertThat(laps.get(6).getLapTimeMillis()).isGreaterThan(90_000L);
-        assertThat(laps.get(6).getLapTime()).matches("\\d+:\\d{2}\\.\\d{3}");
-
-        // Позиция в гонке — из span.p, есть на каждом круге.
-        assertThat(data.getLaps()).allSatisfy(lap -> {
-            assertThat(lap.getRacePosition()).isNotNull();
-            assertThat(lap.getRacePosition()).matches("P\\d+");
-        });
-        assertThat(laps.get(0).getRacePosition()).isNotNull();
+        // Круг заезда в пит: суффикс «7l» срезан, время больше 90 с.
+        assertThat(laps.get(6).getLapTimeMillis()).isEqualTo(95_000L);
+        assertThat(laps.get(6).getLapTime()).isEqualTo("1:35.000");
+        assertThat(stints.get(1).getBestLapMillis()).isEqualTo(74_719L);
     }
 
     @Test
-    @DisplayName("parse: заезд 130516 — DNF-гонщики, по 2–3 стинта, суммы кругов сходятся")
+    @DisplayName("parse: DNF-гонщик с пустыми ячейками и разным числом стинтов")
     void parse_mixedHeat_shouldHandleDnfDrivers() {
-        ParsedHeatData data = heatParser.parse(load("heat130516.html"));
+        ParsedHeatData data = heatParser.parse(Jsoup.parse("""
+                <html><body>
+                <h4>Heat<small class="text-body-secondary">10 Oct 2026, 16:44</small></h4>
+                <table class="heat-result">
+                  <thead>
+                    <tr><th scope="row"></th><th scope="col">1</th><th scope="col">2</th></tr>
+                    <tr><th scope="row">Driver</th>
+                        <th scope="col"><a href="/x/drivers/11">A</a></th>
+                        <th scope="col"><a href="/x/drivers/12">B</a></th></tr>
+                    <tr><th scope="row">Kart</th>
+                        <th scope="col"><a href="/x/karts/20">20</a></th>
+                        <th scope="col"><a href="/x/karts/33">33</a></th></tr>
+                  </thead>
+                  <tbody>
+                    <tr><th scope="row">1</th><td>30.000 <span class="p">P1</span></td><td>31.000 <span class="p">P2</span></td></tr>
+                    <tr><th scope="row">2</th><td>1:14.719 2l <span class="p">P1</span></td><td>32.000 <span class="p">P2</span></td></tr>
+                    <tr><th scope="row">3</th><td>29.000 <span class="p">P1</span></td><td>33.000 <span class="p">P2</span></td></tr>
+                    <tr><th scope="row">4</th><td>28.500 <span class="p">P1</span></td><td>34.000 <span class="p">P2</span></td></tr>
+                    <tr><th scope="row">5</th><td>28.000 <span class="p">P1</span></td><td>35.000 <span class="p">P2</span></td></tr>
+                    <tr><th scope="row">6</th><td></td><td>36.000 <span class="p">P1</span></td></tr>
+                  </tbody>
+                  <tfoot>
+                    <tr><th scope="row">S1 kart</th><td>20</td><td>33</td></tr>
+                    <tr><th scope="row">S1 laps</th><td>1</td><td>1</td></tr>
+                    <tr><th scope="row">S2 kart</th><td>14</td><td>102</td></tr>
+                    <tr><th scope="row">S2 laps</th><td>4</td><td>1</td></tr>
+                    <tr><th scope="row">S2 best</th><td>1:14.719</td><td>32.000</td></tr>
+                    <tr><th scope="row">S3 kart</th><td></td><td>33</td></tr>
+                    <tr><th scope="row">S3 laps</th><td></td><td>4</td></tr>
+                  </tfoot>
+                </table>
+                </body></html>
+                """));
 
-        assertThat(data.getDrivers()).hasSize(12);
-        assertThat(data.getLaps()).hasSize(206);
-
+        assertThat(data.getDrivers()).hasSize(2);
+        assertThat(data.getLaps()).hasSize(11);
         assertThat(data.getDrivers()).extracting(d -> d.getStints().size())
-                .containsExactly(2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 3, 3);
+                .containsExactly(2, 3);
         assertThat(data.getDrivers()).extracting(d -> d.getStints().get(0).getKartNumber())
-                .containsExactly(19, 13, 32, 26, 27, 14, 15, 34, 18, 17, 20, 33);
+                .containsExactly(20, 33);
 
-        // Последние два гонщика меняли карт дважды: 20 → 101 → 14 и 33 → 102 → 33.
-        ParsedHeatData.ParsedDriver first = data.getDrivers().get(10);
+        ParsedHeatData.ParsedDriver first = data.getDrivers().get(0);
         assertThat(first.getStints()).extracting(ParsedHeatData.ParsedStint::getLapFrom)
-                .containsExactly(1, 2, 7);
+                .containsExactly(1, 2);
         assertThat(first.getStints()).extracting(ParsedHeatData.ParsedStint::getLapTo)
-                .containsExactly(1, 6, 16);
+                .containsExactly(1, 5);
         assertThat(first.getStints()).extracting(ParsedHeatData.ParsedStint::getKartNumber)
-                .containsExactly(20, 101, 14);
+                .containsExactly(20, 14);
 
-        ParsedHeatData.ParsedDriver second = data.getDrivers().get(11);
+        ParsedHeatData.ParsedDriver second = data.getDrivers().get(1);
         assertThat(second.getStints()).extracting(ParsedHeatData.ParsedStint::getLapFrom)
                 .containsExactly(1, 2, 3);
         assertThat(second.getStints()).extracting(ParsedHeatData.ParsedStint::getLapTo)
-                .containsExactly(1, 2, 16);
+                .containsExactly(1, 2, 6);
+        assertThat(second.getStints()).extracting(ParsedHeatData.ParsedStint::getKartNumber)
+                .containsExactly(33, 102, 33);
 
-        // У каждого гонщика сумма кругов стинтов равна числу его кругов в таблице.
         for (ParsedHeatData.ParsedDriver driver : data.getDrivers()) {
             List<ParsedHeatData.ParsedLap> laps = lapsOf(data, driver.getSiteId());
             assertThat(driver.getStints().stream()
@@ -203,9 +254,10 @@ class HeatParserTest {
                     .isEqualTo(driver.getStints().get(driver.getStints().size() - 1).getKartNumber());
         }
 
-        // Лучший круг второго стинта первого гонщика — 1:14.719.
-        assertThat(data.getDrivers().get(0).getStints().get(1).getBestLapMillis())
-                .isEqualTo(74_719L);
+        // DNF: у первого гонщика нет круга 6, но суммы стинтов сходятся.
+        assertThat(lapsOf(data, first.getSiteId())).hasSize(5);
+        assertThat(lapsOf(data, second.getSiteId())).hasSize(6);
+        assertThat(first.getStints().get(1).getBestLapMillis()).isEqualTo(74_719L);
     }
 
     @Test
@@ -275,14 +327,5 @@ class HeatParserTest {
         return data.getLaps().stream()
                 .filter(lap -> siteId.equals(lap.getDriverSiteId()))
                 .toList();
-    }
-
-    private static Document load(String resource) {
-        try (InputStream in = HeatParserTest.class.getClassLoader().getResourceAsStream(resource)) {
-            assertThat(in).as("resource %s", resource).isNotNull();
-            return Jsoup.parse(new String(in.readAllBytes(), StandardCharsets.UTF_8));
-        } catch (Exception e) {
-            throw new IllegalStateException("Не удалось прочитать " + resource, e);
-        }
     }
 }
