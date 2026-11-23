@@ -323,6 +323,59 @@ class HeatParserTest {
                 .containsExactly("30.000", "30.100");
     }
 
+    @Test
+    @DisplayName("parse: компактный stress-тест на 12 гонщиков и 206 кругов")
+    void parse_largeHeat_generatesAllLapsAndStints() {
+        int driversCount = 12;
+        int lapsCount = 206;
+        StringBuilder html = new StringBuilder("""
+                <html><body>
+                <h4>Stress Heat<small class="text-body-secondary">10 Oct 2026, 16:44</small></h4>
+                <table class="heat-result"><thead>
+                """);
+        html.append("<tr><th scope=\"row\"></th>");
+        for (int i = 1; i <= driversCount; i++) {
+            html.append("<th scope=\"col\">").append(i).append("</th>");
+        }
+        html.append("</tr><tr><th scope=\"row\">Driver</th>");
+        for (int i = 0; i < driversCount; i++) {
+            html.append("<th scope=\"col\"><a href=\"/x/drivers/").append(100 + i)
+                    .append("\">D").append(i).append("</a></th>");
+        }
+        html.append("</tr><tr><th scope=\"row\">Kart</th>");
+        for (int i = 0; i < driversCount; i++) {
+            html.append("<th scope=\"col\"><a href=\"/x/karts/").append(200 + i)
+                    .append("\">").append(200 + i).append("</a></th>");
+        }
+        html.append("</tr></thead><tbody>");
+        for (int lap = 1; lap <= lapsCount; lap++) {
+            html.append("<tr><th scope=\"row\">").append(lap).append("</th>");
+            for (int i = 0; i < driversCount; i++) {
+                html.append("<td>30.500 <span class=\"p\">P").append(i + 1).append("</span></td>");
+            }
+            html.append("</tr>");
+        }
+        html.append("</tbody></table></body></html>");
+
+        ParsedHeatData data = heatParser.parse(Jsoup.parse(html.toString()));
+
+        assertThat(data.getDrivers()).hasSize(driversCount);
+        assertThat(data.getDrivers()).extracting(ParsedHeatData.ParsedDriver::getSiteId)
+                .containsExactly("100", "101", "102", "103", "104", "105",
+                        "106", "107", "108", "109", "110", "111");
+        assertThat(data.getLaps()).hasSize(driversCount * lapsCount);
+        assertThat(data.getDrivers()).allSatisfy(driver -> {
+            assertThat(driver.getStints()).hasSize(1);
+            assertThat(driver.getStints().get(0).getKartNumber()).isNotNull();
+        });
+        assertThat(data.getLaps()).allSatisfy(lap -> {
+            assertThat(lap.getRaceLapNumber()).isBetween(1, lapsCount);
+            assertThat(lap.getStintIndex()).isEqualTo(1);
+            assertThat(lap.getKartNumber()).isNotNull();
+            assertThat(lap.getLapTime()).isEqualTo("30.500");
+        });
+    }
+
     private static List<ParsedHeatData.ParsedLap> lapsOf(ParsedHeatData data, String siteId) {
         return data.getLaps().stream()
                 .filter(lap -> siteId.equals(lap.getDriverSiteId()))

@@ -77,7 +77,8 @@ class ApiControllerTest {
         mockMvc.perform(get("/api/heat/136223"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.heatName").value("Heat 30"))
-                .andExpect(jsonPath("$.raceDate").value("2026-11-21"));
+                .andExpect(jsonPath("$.raceDate").value("2026-11-21"))
+                .andExpect(jsonPath("$.status").value("UNKNOWN"));
     }
 
     @Test

@@ -14,6 +14,9 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.test.util.ReflectionTestUtils;
 
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.LocalTime;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -155,8 +158,37 @@ class HeatServiceTest {
 
         HeatData result = heatService.getHeatData("100");
 
-        assertThat(result).isSameAs(data);
+        assertThat(result.getHeatName()).isEqualTo("Heat 1");
+        assertThat(result.getStatus()).isEqualTo(HeatData.STATUS_UNKNOWN);
         verify(heatSyncService, never()).syncHeat("100");
+    }
+
+    @Test
+    @DisplayName("heat: живой заезд получает статус IN_PROGRESS")
+    void getHeatData_marksLiveHeatAsInProgress() {
+        HeatData data = new HeatData("Heat 1", LocalDate.now(), LocalTime.NOON, List.of(), List.of());
+        when(heatReadService.findCached("100"))
+                .thenReturn(Optional.of(new HeatReadService.CachedHeat(data, false)));
+        when(liveTimingService.getLiveHeatId()).thenReturn("100");
+
+        HeatData result = heatService.getHeatData("100");
+
+        assertThat(result.getStatus()).isEqualTo(HeatData.STATUS_IN_PROGRESS);
+        assertThat(data.getStatus()).isEqualTo(HeatData.STATUS_UNKNOWN);
+    }
+
+    @Test
+    @DisplayName("heat: прошедший заезд получает статус FINISHED")
+    void getHeatData_marksPastHeatAsFinished() {
+        LocalDateTime start = LocalDateTime.now().minusHours(2);
+        HeatData data = new HeatData("Heat 1", start.toLocalDate(), start.toLocalTime(), List.of(), List.of());
+        when(heatReadService.findCached("100"))
+                .thenReturn(Optional.of(new HeatReadService.CachedHeat(data, false)));
+        when(liveTimingService.getLiveHeatId()).thenReturn(null);
+
+        HeatData result = heatService.getHeatData("100");
+
+        assertThat(result.getStatus()).isEqualTo(HeatData.STATUS_FINISHED);
     }
 
     @Test

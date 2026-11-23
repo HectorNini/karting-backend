@@ -12,11 +12,23 @@ import java.util.List;
 @NoArgsConstructor
 @AllArgsConstructor
 public class HeatData {
+    /** Статус заезда для клиента: IN_PROGRESS / FINISHED / UNKNOWN. */
+    public static final String STATUS_IN_PROGRESS = "IN_PROGRESS";
+    public static final String STATUS_FINISHED = "FINISHED";
+    public static final String STATUS_UNKNOWN = "UNKNOWN";
+
     private String heatName;
     private LocalDate raceDate;
     private LocalTime raceTime;
     private List<DriverInfo> drivers;
     private List<LapRow> laps;
+    private String status;
+
+    /** Конструктор для тестов и старых вызывающих кодов без статуса. */
+    public HeatData(String heatName, LocalDate raceDate, LocalTime raceTime,
+                    List<DriverInfo> drivers, List<LapRow> laps) {
+        this(heatName, raceDate, raceTime, drivers, laps, STATUS_UNKNOWN);
+    }
 
     @Data
     @NoArgsConstructor

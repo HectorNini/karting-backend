@@ -12,6 +12,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
 
+import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
@@ -29,6 +30,13 @@ public class HeatService {
      * Старые дыры в БД не догоняем пачкой — они подтянутся при открытии.
      */
     private static final int NEW_HEATS_SCAN_LIMIT = 20;
+
+    /**
+     * Заезд считается завершённым спустя столько минут после времени старта,
+     * если live-сессия уже не активна. Запас нужен, чтобы не остановить опрос
+     * на финише раньше, чем backend получит финальные данные с сайта.
+     */
+    private static final long FINISH_GRACE_MINUTES = 30;
 
     /**
      * Фоновая проверка новых заездов. Старые заезды не перечитываем:
@@ -90,13 +98,13 @@ public class HeatService {
                 log.info("Заезд {} без стинтов — ставим на пересинхронизацию", heatSiteId);
                 heatPrefetchService.resyncOneAsync(heatSiteId);
             }
-            return heat.data();
+            return withStatus(heat.data(), heatSiteId);
         }
 
         meterRegistry.counter("karting.heat.cache.requests", "hit", "false").increment();
         log.info("Заезд {} не найден в БД, запускаем синхронизацию...", heatSiteId);
         try {
-            return heatSyncService.syncHeat(heatSiteId);
+            return withStatus(heatSyncService.syncHeat(heatSiteId), heatSiteId);
         } catch (SiteRateLimitedException e) {
             log.warn("Синхронизация заезда {} отложена: {}", heatSiteId, e.getMessage());
             throw e;
@@ -104,6 +112,33 @@ public class HeatService {
             log.error("Синхронизация заезда {} не удалась: {}", heatSiteId, e.getMessage());
             throw new RuntimeException("Не удалось загрузить заезд " + heatSiteId + ". Попробуйте обновить список или повторить позже.", e);
         }
+    }
+
+    /**
+     * Статус живёт вне кэша: live-сессия может закончиться, а DTO в кэше
+     * остаться тем же. Поэтому на каждый запрос отдаём копию со свежим статусом.
+     */
+    private HeatData withStatus(HeatData data, String heatSiteId) {
+        HeatData result = new HeatData(
+                data.getHeatName(), data.getRaceDate(), data.getRaceTime(),
+                data.getDrivers(), data.getLaps());
+        result.setStatus(resolveStatus(data, heatSiteId));
+        return result;
+    }
+
+    private String resolveStatus(HeatData data, String heatSiteId) {
+        String liveHeatId = liveTimingService.getLiveHeatId();
+        if (liveHeatId != null && liveHeatId.equals(heatSiteId)) {
+            return HeatData.STATUS_IN_PROGRESS;
+        }
+        if (data.getRaceDate() != null && data.getRaceTime() != null) {
+            LocalDateTime finishedAt = LocalDateTime.of(data.getRaceDate(), data.getRaceTime())
+                    .plusMinutes(FINISH_GRACE_MINUTES);
+            if (finishedAt.isBefore(LocalDateTime.now())) {
+                return HeatData.STATUS_FINISHED;
+            }
+        }
+        return HeatData.STATUS_UNKNOWN;
     }
 
     /**
