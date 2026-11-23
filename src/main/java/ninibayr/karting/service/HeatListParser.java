@@ -28,8 +28,6 @@ import java.util.concurrent.TimeUnit;
 @Slf4j
 public class HeatListParser {
 
-    /** Максимальное число заездов, которое отдаём в списке. */
-    private static final int MAX_HEATS = 200;
     /** Защита от бесконечного цикла при обходе страниц пагинации (50 заездов на страницу). */
     private static final int MAX_PAGES = 20;
     /** 5 МБ более чем достаточно для страницы со списком заездов. */
@@ -124,7 +122,7 @@ public class HeatListParser {
         LocalDate[] carryDate = new LocalDate[]{null};
 
         int page = 0;
-        while (url != null && page < MAX_PAGES && byId.size() < MAX_HEATS) {
+        while (url != null && page < MAX_PAGES) {
             long pageStartedAt = System.nanoTime();
             try {
                 siteRequestGate.beforeRequest();
@@ -150,9 +148,6 @@ public class HeatListParser {
                 List<HeatList.HeatItem> pageItems = parse(doc, trackSlug, year, carry, carryDate);
                 for (HeatList.HeatItem item : pageItems) {
                     byId.putIfAbsent(item.getId(), item);
-                    if (byId.size() >= MAX_HEATS) {
-                        break;
-                    }
                 }
 
                 // Ссылка на следующую страницу (?start_time=...)
@@ -186,9 +181,6 @@ public class HeatListParser {
         }
 
         List<HeatList.HeatItem> heats = new ArrayList<>(byId.values());
-        if (heats.size() > MAX_HEATS) {
-            heats = heats.subList(0, MAX_HEATS);
-        }
         meterRegistry.summary("karting.list.heats").record(heats.size());
         return new HeatList(trackSlug, heats);
     }
